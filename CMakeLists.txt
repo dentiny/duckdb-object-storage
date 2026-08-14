@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.5)
 
 # Set extension name here
-set(TARGET_NAME quack)
+set(TARGET_NAME duckdb_object_storage)
 
 # DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
 # used in cmake with find_package. Feel free to remove or replace with other dependencies.
@@ -14,7 +14,7 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 project(${TARGET_NAME})
 include_directories(src/include rust/include)
 
-set(EXTENSION_SOURCES src/quack_extension.cpp src/slatedb_file_system.cpp)
+set(EXTENSION_SOURCES src/duckdb_object_storage_extension.cpp src/slatedb_file_system.cpp)
 
 # ---------------------------------------------------------------------------
 # SlateDB rust crate (https://slatedb.io/)

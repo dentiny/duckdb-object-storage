@@ -1,0 +1,29 @@
+# name: test/sql/duckdb_object_storage.test
+# description: test duckdb_object_storage extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT duckdb_object_storage('Sam');
+----
+Catalog Error: Scalar Function with name duckdb_object_storage does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require duckdb_object_storage
+
+# Confirm the extension works
+query I
+SELECT duckdb_object_storage('Sam');
+----
+DuckdbObjectStorage Sam 🐥
+
+query I
+SELECT duckdb_object_storage_openssl_version('Michael') ILIKE 'DuckdbObjectStorage Michael, my linked OpenSSL version is OpenSSL%';
+----
+true
+
+# SlateDB VFS is registered and claims slatedb:// paths
+statement error
+SELECT * FROM glob('slatedb://dummy/**');
+----
+dummy implementation
