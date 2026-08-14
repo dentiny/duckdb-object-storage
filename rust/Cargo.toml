@@ -1,0 +1,17 @@
+[package]
+name = "slatedb-fs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "SlateDB-backed DuckDB filesystem (dummy implementation)"
+
+[lib]
+name = "slatedb_fs"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# https://slatedb.io/ — embedded LSM on object storage.
+# default-features (aws, foyer) are left off for a lighter compile while the VFS is dummy.
+slatedb = { version = "0.15", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
