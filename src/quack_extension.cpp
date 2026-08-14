@@ -1,9 +1,11 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "quack_extension.hpp"
+#include "slatedb_file_system.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/main/database.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
 // OpenSSL linked through vcpkg
@@ -27,6 +29,9 @@ inline void QuackOpenSSLVersionScalarFun(DataChunk &args, ExpressionState &state
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
+	auto &instance = loader.GetDatabaseInstance();
+	instance.GetFileSystem().RegisterSubSystem(make_uniq<SlateDBFileSystem>());
+
 	// Register a scalar function
 	auto quack_scalar_function = ScalarFunction("quack", {LogicalType::VARCHAR}, LogicalType::VARCHAR, QuackScalarFun);
 	loader.RegisterFunction(quack_scalar_function);
