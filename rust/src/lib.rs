@@ -6,5 +6,9 @@
 
 mod ffi;
 mod fs;
+#[allow(dead_code)]
+mod keys;
+#[allow(dead_code)]
+mod metadata;
 
 pub use fs::SlateDbFileSystem;
