@@ -6,18 +6,7 @@ use prost::Message;
 
 pub(crate) const DEFAULT_CHUNK_SIZE: u64 = 256 * 1024;
 
-/// Metadata stored at `m/<file_id:016x>`.
-///
-/// The protobuf tags match the original SlateFS format.
-#[derive(Clone, PartialEq, Message)]
-pub(crate) struct FileMetadata {
-    #[prost(uint64, tag = "1")]
-    pub(crate) size: u64,
-    #[prost(uint64, tag = "2")]
-    pub(crate) modified_at: u64,
-    #[prost(uint64, tag = "3")]
-    pub(crate) chunk_size: u64,
-}
+include!(concat!(env!("OUT_DIR"), "/slatefs.rs"));
 
 impl FileMetadata {
     pub(crate) fn new() -> Self {

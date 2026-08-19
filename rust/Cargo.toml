@@ -10,6 +10,10 @@ description = "SlateDB-backed DuckDB filesystem (dummy implementation)"
 name = "slatedb_fs"
 crate-type = ["staticlib", "rlib"]
 
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3.2"
+
 [dependencies]
 # https://slatedb.io/ — embedded LSM on object storage.
 # default-features (aws, foyer) are left off for a lighter compile while the VFS is dummy.
