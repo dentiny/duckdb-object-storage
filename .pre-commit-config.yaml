@@ -1,0 +1,23 @@
+# Local fast path for the Rust checks that CI enforces.
+# Enable once per clone with: pre-commit install
+repos:
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.43.5
+    hooks:
+      - id: typos
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        language: system
+        types: [rust]
+        pass_filenames: false
+        entry: cargo fmt --manifest-path rust/Cargo.toml --
+
+      - id: cargo-clippy
+        name: cargo clippy
+        language: system
+        types: [rust]
+        pass_filenames: false
+        entry: cargo clippy --manifest-path rust/Cargo.toml --all-targets --all-features -- -D warnings

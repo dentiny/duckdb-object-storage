@@ -1,0 +1,5 @@
+# Pins the compiler so contributors and CI resolve the same toolchain.
+# Requires rustup; a distribution-installed cargo ignores this file.
+[toolchain]
+channel = "1.93.0"
+components = ["clippy", "rustfmt"]
