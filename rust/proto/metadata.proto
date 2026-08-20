@@ -3,14 +3,11 @@ syntax = "proto3";
 package slatefs;
 
 // Metadata for one logical file, stored at `m/<file_id:016x>`.
-//
-// Field tags match the original SlateFS format and must not change once data
-// has been written.
 message FileMetadata {
   // Size of the file in bytes.
   uint64 size = 1;
   // Last modification timestamp, in epoch milliseconds.
-  uint64 modified_at = 2;
+  uint64 modified_at_ms = 2;
   // Size of each chunk in bytes.
   uint64 chunk_size = 3;
 }

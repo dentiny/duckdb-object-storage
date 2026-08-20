@@ -10,5 +10,7 @@ mod fs;
 mod keys;
 #[allow(dead_code)]
 mod metadata;
+#[allow(dead_code)]
+mod util;
 
 pub use fs::SlateDbFileSystem;

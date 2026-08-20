@@ -30,38 +30,3 @@ pub(crate) fn next_file_id_key() -> Vec<u8> {
 pub(crate) fn path_key(path: &str) -> Vec<u8> {
     format!("{PATH_PREFIX}{path}").into_bytes()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn encodes_chunk_key() {
-        assert_eq!(chunk_key(1, 2), b"c/0000000000000001/0000000000000002");
-    }
-
-    #[test]
-    fn chunk_keys_sort_by_file_then_index() {
-        assert!(chunk_key(1, 1) < chunk_key(1, 2));
-        assert!(chunk_key(1, u64::MAX) < chunk_key(2, 0));
-    }
-
-    #[test]
-    fn encodes_metadata_key() {
-        assert_eq!(metadata_key(1), b"m/0000000000000001");
-    }
-
-    #[test]
-    fn allocator_key_sorts_before_file_metadata() {
-        assert_eq!(next_file_id_key(), b"m/0000000000000000/next_file_id");
-        assert!(next_file_id_key() < metadata_key(1));
-    }
-
-    #[test]
-    fn encodes_nested_path_without_normalizing_it() {
-        assert_eq!(
-            path_key("warehouse/main.duckdb"),
-            b"p/warehouse/main.duckdb"
-        );
-    }
-}

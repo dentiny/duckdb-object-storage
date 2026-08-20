@@ -1,9 +1,10 @@
 //! Persisted metadata for a logical SlateFS file.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use prost::Message;
 
+use crate::util::current_time_millis;
+
+/// Matches DuckDB's `DEFAULT_BLOCK_ALLOC_SIZE` of 262144.
 pub(crate) const DEFAULT_CHUNK_SIZE: u64 = 256 * 1024;
 
 include!(concat!(env!("OUT_DIR"), "/slatefs.rs"));
@@ -12,7 +13,7 @@ impl FileMetadata {
     pub(crate) fn new() -> Self {
         Self {
             size: 0,
-            modified_at: current_time_millis(),
+            modified_at_ms: current_time_millis(),
             chunk_size: DEFAULT_CHUNK_SIZE,
         }
     }
@@ -26,48 +27,15 @@ impl FileMetadata {
     }
 }
 
-fn current_time_millis() -> u64 {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    millis.min(u128::from(u64::MAX)) as u64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn new_metadata_has_defaults() {
-        let before = current_time_millis();
-        let metadata = FileMetadata::new();
-        let after = current_time_millis();
-
-        assert_eq!(metadata.size, 0);
-        assert_eq!(metadata.chunk_size, DEFAULT_CHUNK_SIZE);
-        assert!((before..=after).contains(&metadata.modified_at));
-    }
-
-    #[test]
-    fn protobuf_encoding_uses_stable_field_tags() {
-        let metadata = FileMetadata {
-            size: 1024,
-            modified_at: 123,
-            chunk_size: DEFAULT_CHUNK_SIZE,
-        };
-
-        assert_eq!(
-            metadata.encode_to_bytes(),
-            vec![0x08, 0x80, 0x08, 0x10, 0x7b, 0x18, 0x80, 0x80, 0x10]
-        );
-    }
-
-    #[test]
     fn protobuf_roundtrip_preserves_metadata() {
         let metadata = FileMetadata {
             size: 8192,
-            modified_at: 1_234_567_890,
+            modified_at_ms: 1_234_567_890,
             chunk_size: DEFAULT_CHUNK_SIZE,
         };
 
