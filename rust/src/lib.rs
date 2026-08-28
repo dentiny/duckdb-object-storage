@@ -7,6 +7,7 @@
 mod error;
 mod error_struct;
 mod ffi;
+mod flags;
 mod fs;
 #[allow(dead_code)]
 mod keys;
@@ -17,4 +18,5 @@ mod util;
 
 pub use error::{Error, Result};
 pub use error_struct::{ErrorStatus, ErrorStruct};
+pub use flags::FileOpenFlags;
 pub use fs::SlateDbFileSystem;
