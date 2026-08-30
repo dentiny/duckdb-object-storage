@@ -4,6 +4,8 @@
 //! is not implemented yet; this crate exists to prove the SlateDB dependency
 //! and VFS registration compile.
 
+mod error;
+mod error_struct;
 mod ffi;
 mod fs;
 #[allow(dead_code)]
@@ -13,4 +15,6 @@ mod metadata;
 #[allow(dead_code)]
 mod util;
 
+pub use error::{Error, Result};
+pub use error_struct::{ErrorStatus, ErrorStruct};
 pub use fs::SlateDbFileSystem;

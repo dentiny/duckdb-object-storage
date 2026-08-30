@@ -17,6 +17,8 @@ protoc-bin-vendored = "3.2"
 [dependencies]
 # https://slatedb.io/ — embedded LSM on object storage.
 # default-features (aws, foyer) are left off for a lighter compile while the VFS is dummy.
+anyhow = "1"
 prost = "0.14"
 slatedb = { version = "0.15", default-features = false }
+thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
