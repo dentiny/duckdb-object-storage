@@ -74,6 +74,19 @@ impl From<slatedb::Error> for Error {
     }
 }
 
+impl From<std::io::Error> for Error {
+    #[track_caller]
+    fn from(source: std::io::Error) -> Self {
+        let status = match source.kind() {
+            std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut => ErrorStatus::Temporary,
+            _ => ErrorStatus::Permanent,
+        };
+        Error::Io(ErrorStruct::new("io error".to_string(), status).with_source(source))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,6 +116,26 @@ mod tests {
     fn invalid_slatedb_errors_are_permanent() {
         let error = Error::from(slatedb::Error::invalid("bad argument".to_string()));
 
+        assert_eq!(error.status(), ErrorStatus::Permanent);
+    }
+
+    #[test]
+    fn interrupted_io_errors_are_temporary() {
+        let error = Error::from(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "try again",
+        ));
+
+        assert!(matches!(error, Error::Io(_)));
+        assert_eq!(error.status(), ErrorStatus::Temporary);
+        assert!(error.to_string().contains("io error"));
+    }
+
+    #[test]
+    fn not_found_io_errors_are_permanent() {
+        let error = Error::from(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"));
+
+        assert!(matches!(error, Error::Io(_)));
         assert_eq!(error.status(), ErrorStatus::Permanent);
     }
 }
