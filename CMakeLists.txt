@@ -3,9 +3,10 @@ cmake_minimum_required(VERSION 3.5)
 # Set extension name here
 set(TARGET_NAME duckdb_object_storage)
 
-# DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
-# used in cmake with find_package. Feel free to remove or replace with other dependencies.
-# Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
+# DuckDB's extension distribution supports vcpkg. As such, dependencies can be
+# added in ./vcpkg.json and then used in cmake with find_package. Feel free to
+# remove or replace with other dependencies. Note that it should also be removed
+# from vcpkg.json to prevent needlessly installing it..
 find_package(OpenSSL REQUIRED)
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
@@ -14,7 +15,8 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 project(${TARGET_NAME})
 include_directories(src/include rust/include)
 
-set(EXTENSION_SOURCES src/duckdb_object_storage_extension.cpp src/slatedb_file_system.cpp)
+set(EXTENSION_SOURCES src/duckdb_object_storage_extension.cpp
+                      src/slatedb_file_system.cpp)
 
 # ---------------------------------------------------------------------------
 # SlateDB rust crate (https://slatedb.io/)
@@ -68,19 +70,21 @@ else()
   )
 endif()
 
-file(GLOB_RECURSE SLATEDB_FS_RUST_SOURCES
-     "${CMAKE_CURRENT_SOURCE_DIR}/rust/src/*.rs"
-     "${CMAKE_CURRENT_SOURCE_DIR}/rust/include/*.h"
-     "${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml"
-     "${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.lock")
+file(
+  GLOB_RECURSE
+  SLATEDB_FS_RUST_SOURCES
+  "${CMAKE_CURRENT_SOURCE_DIR}/rust/src/*.rs"
+  "${CMAKE_CURRENT_SOURCE_DIR}/rust/include/*.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml"
+  "${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.lock")
 
 add_custom_command(
   OUTPUT "${SLATEDB_FS_LIB}"
   COMMAND
-    ${CMAKE_COMMAND} -E env --unset=CC --unset=CXX --unset=LD ${CARGO_EXECUTABLE}
-    build --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml"
-    --target-dir "${RUST_TARGET_DIR}" ${CARGO_PROFILE_FLAG}
-    ${RUST_CARGO_TARGET_FLAG}
+    ${CMAKE_COMMAND} -E env --unset=CC --unset=CXX --unset=LD
+    ${CARGO_EXECUTABLE} build --manifest-path
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/Cargo.toml" --target-dir
+    "${RUST_TARGET_DIR}" ${CARGO_PROFILE_FLAG} ${RUST_CARGO_TARGET_FLAG}
   DEPENDS ${SLATEDB_FS_RUST_SOURCES}
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/rust"
   COMMENT "Building SlateDB filesystem rust crate"

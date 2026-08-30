@@ -9,7 +9,7 @@
 
 * Great!
 * If possible, add a unit test case to make sure the issue does not occur again.
-* Make sure you run the code formatter (`make format-all`).
+* Make sure you run the code formatter (`make format-all`) and `make lint` passes.
 * Open a new GitHub pull request with the patch.
 * Ensure the PR description clearly describes the problem and solution. Include the relevant issue number if applicable.
 
@@ -37,7 +37,8 @@
 
 * Use tabs for indentation, spaces for alignment.
 * Lines should not exceed 120 columns.
-* `clang-format` enforce these rules automatically, use `make format-all` to run the formatter.
+* `make format-all` applies `clang-format` (via DuckDB `format.py`), `cmake-format`, and `cargo fmt`.
+* `make lint` checks the same tools without writing files.
 
 ### DuckDB C++ Guidelines
 
