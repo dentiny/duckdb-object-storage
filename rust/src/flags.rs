@@ -52,7 +52,7 @@ impl FileOpenFlags {
         }
     }
 
-    /// Rejects the combinations DuckDB's own `FileOpenFlags::Verify` treats as invalid.
+    /// DuckDB's `FileOpenFlags::Verify` treats some combinations as invalid.
     // Checked once when a file is opened
     pub fn validate(&self, file_id: u64) -> Result<()> {
         let reason = if !self.read && !self.write {
