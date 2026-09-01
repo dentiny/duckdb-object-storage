@@ -22,3 +22,6 @@ prost = "0.14"
 slatedb = { version = "0.15", default-features = false }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }

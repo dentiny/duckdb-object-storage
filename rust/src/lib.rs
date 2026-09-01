@@ -7,16 +7,22 @@
 mod error;
 mod error_struct;
 mod ffi;
+// Fully exercised once the remaining file handle operations land.
+#[allow(dead_code)]
+mod file_handle;
 mod flags;
 mod fs;
 #[allow(dead_code)]
 mod keys;
 #[allow(dead_code)]
 mod metadata;
+#[cfg(test)]
+mod test_utils;
 #[allow(dead_code)]
 mod util;
 
 pub use error::{Error, Result};
 pub use error_struct::{ErrorStatus, ErrorStruct};
+pub use file_handle::{FileHandle, SlateFileHandle};
 pub use flags::FileOpenFlags;
 pub use fs::SlateDbFileSystem;
