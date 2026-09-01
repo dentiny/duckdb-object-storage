@@ -8,7 +8,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use futures::future;
-use slatedb::Db;
+use slatedb::{Db, WriteBatch};
 use tokio::runtime::Runtime;
 
 use crate::error::{Error, Result};
@@ -50,9 +50,18 @@ pub trait FileHandle: Debug {
     fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize>;
 
     /// Writes `data` at `offset`, extending the file if it runs past the end.
-    /// The bytes are buffered in the handle; they are visible to this handle's
-    /// reads immediately, and are persisted by a later flush.
+    /// The bytes are buffered until [`FileHandle::sync`]; they are visible to
+    /// this handle's reads immediately, and to nobody else until then.
     fn pwrite(&mut self, data: &[u8], offset: u64) -> Result<()>;
+
+    /// Persists buffered writes, deletions and metadata, then flushes, so a
+    /// successful return means the data survives a crash.
+    fn sync(&mut self) -> Result<()>;
+
+    /// Flushes anything buffered and releases the handle. Taken by reference
+    /// so it can be called through the `dyn FileHandle` the filesystem hands
+    /// out, which is where DuckDB's `FileHandle::Close` will reach it.
+    fn close(&mut self) -> Result<()>;
 }
 
 /// A file opened against a SlateDB instance.
@@ -123,6 +132,15 @@ impl SlateFileHandle {
     fn set_metadata_dirty(&mut self) {
         self.modified_at_ms = current_time_millis();
         self.metadata_dirty = true;
+    }
+
+    /// The record [`FileHandle::sync`] persists, reflecting buffered writes.
+    fn metadata(&self) -> FileMetadata {
+        FileMetadata {
+            size: self.size,
+            modified_at_ms: self.modified_at_ms,
+            chunk_size: self.chunk_size_u64(),
+        }
     }
 
     /// Reads one chunk, honouring the buffered deletions that make a stored
@@ -301,6 +319,41 @@ impl FileHandle for SlateFileHandle {
         self.size = self.size.max(end_offset);
         self.set_metadata_dirty();
         Ok(())
+    }
+
+    fn sync(&mut self) -> Result<()> {
+        if self.dirty_chunks.is_empty() && self.deleted_chunks.is_empty() && !self.metadata_dirty {
+            return Ok(());
+        }
+
+        let mut batch = WriteBatch::new();
+        // Deletions are staged first so a chunk that was deleted and written
+        // again in the same session ends up with its new contents.
+        for chunk_index in &self.deleted_chunks {
+            batch.delete(keys::chunk_key(self.file_id, *chunk_index));
+        }
+        for (chunk_index, chunk) in &self.dirty_chunks {
+            batch.put(keys::chunk_key(self.file_id, *chunk_index), chunk);
+        }
+        batch.put(
+            keys::metadata_key(self.file_id),
+            self.metadata().encode_to_bytes(),
+        );
+
+        self.runtime.block_on(async {
+            self.db.write(batch).await?;
+            self.db.flush().await?;
+            Ok::<(), Error>(())
+        })?;
+
+        self.dirty_chunks.clear();
+        self.deleted_chunks.clear();
+        self.metadata_dirty = false;
+        Ok(())
+    }
+
+    fn close(&mut self) -> Result<()> {
+        self.sync()
     }
 
     fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
@@ -540,6 +593,23 @@ mod tests {
         .expect("handle")
     }
 
+    fn stored_chunk(fixture: &TestDb, chunk_index: u64) -> Option<Vec<u8>> {
+        fixture
+            .runtime
+            .block_on(fixture.db.get(keys::chunk_key(FILE_ID, chunk_index)))
+            .expect("get")
+            .map(|bytes| bytes.to_vec())
+    }
+
+    fn stored_metadata(fixture: &TestDb) -> FileMetadata {
+        let bytes = fixture
+            .runtime
+            .block_on(fixture.db.get(keys::metadata_key(FILE_ID)))
+            .expect("get")
+            .expect("metadata should be stored");
+        FileMetadata::decode_from_bytes(&bytes).expect("metadata should decode")
+    }
+
     #[test]
     fn writes_are_visible_to_reads_while_still_buffered() {
         let fixture = TestDb::new();
@@ -552,6 +622,7 @@ mod tests {
         let mut buf = [0u8; 5];
         assert_eq!(handle.pread(&mut buf, 0).expect("pread"), 5);
         assert_eq!(&buf, b"hello");
+        assert!(stored_chunk(&fixture, 0).is_none(), "nothing persisted yet");
     }
 
     #[test]
@@ -560,15 +631,16 @@ mod tests {
         let mut handle = open_writable(&fixture);
 
         handle.pwrite(b"0123456789abcdefghij", 4).expect("pwrite");
+        handle.sync().expect("sync");
 
         assert_eq!(handle.file_size(), 24);
         // The hole ahead of the write is zero-filled, not left short.
         assert_eq!(
-            handle.dirty_chunks[&0],
+            stored_chunk(&fixture, 0).unwrap(),
             [&[0u8; 4], b"0123".as_slice()].concat()
         );
-        assert_eq!(handle.dirty_chunks[&1], b"456789ab");
-        assert_eq!(handle.dirty_chunks[&2], b"cdefghij");
+        assert_eq!(stored_chunk(&fixture, 1).unwrap(), b"456789ab");
+        assert_eq!(stored_chunk(&fixture, 2).unwrap(), b"cdefghij");
     }
 
     #[test]
@@ -591,8 +663,9 @@ mod tests {
         handle.flags = FileOpenFlags::read_write();
 
         handle.pwrite(b"XY", 3).expect("pwrite");
+        handle.sync().expect("sync");
 
-        assert_eq!(handle.dirty_chunks[&0], b"abcXYfgh");
+        assert_eq!(stored_chunk(&fixture, 0).unwrap(), b"abcXYfgh");
     }
 
     #[test]
@@ -603,11 +676,43 @@ mod tests {
         handle.deleted_chunks.insert(0);
 
         handle.pwrite(b"zz", 0).expect("pwrite");
+        handle.sync().expect("sync");
 
         // The chunk is no longer pending deletion, and the bytes it held
         // before deletion stay gone.
         assert!(handle.deleted_chunks.is_empty());
-        assert_eq!(handle.dirty_chunks[&0], b"zz");
+        assert_eq!(stored_chunk(&fixture, 0).unwrap(), b"zz");
+    }
+
+    #[test]
+    fn sync_persists_chunks_and_metadata_then_clears_the_buffer() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+        handle.pwrite(b"hello", 0).expect("pwrite");
+
+        handle.sync().expect("sync");
+
+        assert_eq!(stored_chunk(&fixture, 0).unwrap(), b"hello");
+        let metadata = stored_metadata(&fixture);
+        assert_eq!(metadata.size, 5);
+        assert_eq!(metadata.chunk_size, TEST_CHUNK_SIZE);
+        assert!(metadata.modified_at_ms > 0);
+        assert!(handle.dirty_chunks.is_empty());
+        assert!(!handle.metadata_dirty);
+    }
+
+    #[test]
+    fn sync_without_changes_writes_nothing() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+
+        handle.sync().expect("sync");
+
+        assert!(fixture
+            .runtime
+            .block_on(fixture.db.get(keys::metadata_key(FILE_ID)))
+            .expect("get")
+            .is_none());
     }
 
     #[test]
@@ -644,5 +749,19 @@ mod tests {
             .expect_err("write should be rejected");
 
         assert!(matches!(error, Error::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn close_flushes_what_is_still_buffered() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+        handle.pwrite(b"hello", 0).expect("pwrite");
+
+        FileHandle::close(&mut handle).expect("close");
+
+        assert_eq!(stored_chunk(&fixture, 0).unwrap(), b"hello");
+        // Nothing is left buffered, so closing again is a no-op rather than
+        // a second write or a failure.
+        FileHandle::close(&mut handle).expect("close again");
     }
 }
