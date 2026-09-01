@@ -3,14 +3,17 @@
 //! A file is stored as a metadata record plus fixed-size chunks, addressed by
 //! the keys in [`crate::keys`].
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::sync::Arc;
 
+use futures::future;
 use slatedb::Db;
 use tokio::runtime::Runtime;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::flags::FileOpenFlags;
+use crate::keys;
 use crate::metadata::FileMetadata;
 
 /// The operations DuckDB's `FileHandle` needs from a SlateFS file.
@@ -35,9 +38,21 @@ pub trait FileHandle: Debug {
 
     /// Returns the flags the file was opened with.
     fn flags(&self) -> FileOpenFlags;
+
+    /// Reads at most `buf.len()` bytes starting at `offset`, returning how many
+    /// bytes were read. A read past the end of the file returns 0, and a read
+    /// that runs past it is truncated to what the file holds.
+    ///
+    /// Regions the file covers but no chunk backs read as zeros, so a file
+    /// written sparsely reads back as if it had been zero-filled.
+    fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize>;
 }
 
 /// A file opened against a SlateDB instance.
+///
+/// The buffered state is a write-back cache over the persisted chunks: a chunk
+/// in `dirty_chunks` shadows whatever is stored, and one in `deleted_chunks`
+/// reads back as absent. Both are drained by `sync`.
 pub struct SlateFileHandle {
     db: Arc<Db>,
     /// Async runtime, so the blocking calls DuckDB makes can drive SlateDB.
@@ -48,7 +63,23 @@ pub struct SlateFileHandle {
     size: u64,
     modified_at_ms: u64,
     chunk_size: usize,
+    /// Chunk index to buffered contents, not yet persisted.
+    dirty_chunks: BTreeMap<u64, Vec<u8>>,
+    /// Chunk indices whose persisted contents are pending deletion.
+    deleted_chunks: BTreeSet<u64>,
     flags: FileOpenFlags,
+}
+
+/// One chunk's contribution to a `pread`, resolved before any I/O so the
+/// chunks a read spans can be fetched together.
+struct ChunkRead {
+    chunk_index: u64,
+    /// Where in the caller's buffer this chunk's bytes start.
+    buf_offset: usize,
+    /// Where in the chunk to start copying from.
+    chunk_offset: usize,
+    /// How many bytes the chunk may contribute; it may hold fewer.
+    len: usize,
 }
 
 impl SlateFileHandle {
@@ -70,9 +101,70 @@ impl SlateFileHandle {
             size: metadata.size,
             modified_at_ms: metadata.modified_at_ms,
             chunk_size,
+            dirty_chunks: BTreeMap::new(),
+            deleted_chunks: BTreeSet::new(),
             flags,
         })
     }
+
+    fn chunk_size_u64(&self) -> u64 {
+        self.chunk_size as u64
+    }
+
+    /// Fetches the given chunks concurrently, in the order requested. A chunk
+    /// with no stored value comes back empty, which is how a sparse file's
+    /// holes turn into zeros.
+    fn read_chunks_from_store(&self, chunk_indices: &[u64]) -> Result<Vec<Vec<u8>>> {
+        self.runtime.block_on(async {
+            future::try_join_all(chunk_indices.iter().map(|chunk_index| {
+                let db = Arc::clone(&self.db);
+                let key = keys::chunk_key(self.file_id, *chunk_index);
+                async move {
+                    let bytes = db.get(&key).await?;
+                    Ok::<Vec<u8>, Error>(bytes.map(|bytes| bytes.to_vec()).unwrap_or_default())
+                }
+            }))
+            .await
+        })
+    }
+
+    /// Splits `[offset, offset + len)` into the chunks it spans, copying from
+    /// buffered chunks directly and returning the reads that need the store.
+    fn plan_read(&self, buf: &mut [u8], offset: u64, len: usize) -> Vec<ChunkRead> {
+        let mut persisted_reads = Vec::new();
+        let mut copied = 0usize;
+
+        while copied < len {
+            let current_offset = offset + copied as u64;
+            let chunk_index = current_offset / self.chunk_size_u64();
+            let chunk_offset = (current_offset % self.chunk_size_u64()) as usize;
+            let to_copy = (len - copied).min(self.chunk_size - chunk_offset);
+
+            if let Some(chunk) = self.dirty_chunks.get(&chunk_index) {
+                copy_chunk(buf, copied, chunk, chunk_offset, to_copy);
+            } else if !self.deleted_chunks.contains(&chunk_index) {
+                persisted_reads.push(ChunkRead {
+                    chunk_index,
+                    buf_offset: copied,
+                    chunk_offset,
+                    len: to_copy,
+                });
+            }
+
+            copied += to_copy;
+        }
+
+        persisted_reads
+    }
+}
+
+/// Copies what `chunk` can supply into `buf`, leaving the rest untouched. A
+/// stored chunk may be shorter than the region asked for, because only the
+/// bytes actually written to it are persisted.
+fn copy_chunk(buf: &mut [u8], buf_offset: usize, chunk: &[u8], chunk_offset: usize, len: usize) {
+    let available = chunk.len().saturating_sub(chunk_offset).min(len);
+    buf[buf_offset..buf_offset + available]
+        .copy_from_slice(&chunk[chunk_offset..chunk_offset + available]);
 }
 
 impl Debug for SlateFileHandle {
@@ -83,6 +175,8 @@ impl Debug for SlateFileHandle {
             .field("size", &self.size)
             .field("modified_at_ms", &self.modified_at_ms)
             .field("chunk_size", &self.chunk_size)
+            .field("dirty_chunks", &self.dirty_chunks.keys())
+            .field("deleted_chunks", &self.deleted_chunks)
             .finish()
     }
 }
@@ -115,6 +209,34 @@ impl FileHandle for SlateFileHandle {
     fn flags(&self) -> FileOpenFlags {
         self.flags
     }
+
+    fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
+        self.flags.ensure_readable(self.file_id)?;
+
+        if buf.is_empty() || offset >= self.size {
+            return Ok(0);
+        }
+
+        let bytes_to_read = usize::try_from(self.size - offset)
+            .unwrap_or(usize::MAX)
+            .min(buf.len());
+        // Pre-fill so unbacked regions, whether sparse holes, deleted chunks or
+        // short stored chunks, read as zeros without a second pass.
+        buf[..bytes_to_read].fill(0);
+
+        let persisted_reads = self.plan_read(buf, offset, bytes_to_read);
+        let chunk_indices: Vec<u64> = persisted_reads
+            .iter()
+            .map(|read| read.chunk_index)
+            .collect();
+        let chunks = self.read_chunks_from_store(&chunk_indices)?;
+
+        for (read, chunk) in persisted_reads.iter().zip(chunks) {
+            copy_chunk(buf, read.buf_offset, &chunk, read.chunk_offset, read.len);
+        }
+
+        Ok(bytes_to_read)
+    }
 }
 
 #[cfg(test)]
@@ -127,6 +249,8 @@ mod tests {
     use crate::test_utils::TestDb;
 
     const FILE_ID: u64 = 7;
+    /// Small enough to make chunk-spanning reads readable in tests.
+    const TEST_CHUNK_SIZE: u64 = 8;
 
     /// Borrowed, not created here: dropping the fixture closes the database.
     fn open(
@@ -141,6 +265,33 @@ mod tests {
             metadata,
             flags,
         )
+    }
+
+    /// Opens a read-only handle over `size` bytes of `chunks`, written straight
+    /// to SlateDB so reads see stored data rather than buffered writes.
+    fn open_with_stored_chunks(
+        fixture: &TestDb,
+        size: u64,
+        chunks: &[(u64, &str)],
+    ) -> SlateFileHandle {
+        for (chunk_index, contents) in chunks {
+            let key = keys::chunk_key(FILE_ID, *chunk_index);
+            fixture
+                .runtime
+                .block_on(fixture.db.put(key, contents.as_bytes()))
+                .expect("chunk should be stored");
+        }
+
+        open(
+            fixture,
+            FileMetadata {
+                size,
+                modified_at_ms: 0,
+                chunk_size: TEST_CHUNK_SIZE,
+            },
+            FileOpenFlags::read_only(),
+        )
+        .expect("handle")
     }
 
     #[test]
@@ -186,5 +337,99 @@ mod tests {
 
         assert!(matches!(error, Error::InvalidArgument(_)));
         assert!(error.to_string().contains("at least one of read or write"));
+    }
+
+    #[test]
+    fn pread_reads_stored_bytes_within_one_chunk() {
+        let fixture = TestDb::new();
+        let mut handle = open_with_stored_chunks(&fixture, 8, &[(0, "abcdefgh")]);
+
+        let mut buf = [0u8; 3];
+        assert_eq!(handle.pread(&mut buf, 2).expect("pread"), 3);
+        assert_eq!(&buf, b"cde");
+        assert_eq!(
+            handle.seek_position(),
+            0,
+            "a positional read moves no cursor"
+        );
+    }
+
+    #[test]
+    fn pread_spans_chunk_boundaries() {
+        let fixture = TestDb::new();
+        let mut handle = open_with_stored_chunks(
+            &fixture,
+            20,
+            &[(0, "aaaaaaaa"), (1, "bbbbbbbb"), (2, "cccc")],
+        );
+
+        let mut buf = [0u8; 12];
+        assert_eq!(handle.pread(&mut buf, 6).expect("pread"), 12);
+        assert_eq!(&buf, b"aabbbbbbbbcc");
+    }
+
+    #[test]
+    fn pread_stops_at_the_end_of_the_file() {
+        let fixture = TestDb::new();
+        // The stored chunk holds more than the file's recorded size covers.
+        let mut handle = open_with_stored_chunks(&fixture, 5, &[(0, "abcdefgh")]);
+
+        let mut buf = [0xffu8; 8];
+        assert_eq!(handle.pread(&mut buf, 3).expect("pread"), 2);
+        assert_eq!(&buf[..2], b"de");
+        // Past the recorded size the caller's buffer is left alone, and a read
+        // starting there returns nothing at all.
+        assert_eq!(&buf[2..], &[0xff; 6]);
+        assert_eq!(handle.pread(&mut buf, 5).expect("pread"), 0);
+        assert_eq!(handle.pread(&mut [], 0).expect("pread"), 0);
+        assert_eq!(&buf[2..], &[0xff; 6]);
+    }
+
+    #[test]
+    fn write_only_handles_reject_reads() {
+        let fixture = TestDb::new();
+        let mut handle = open_with_stored_chunks(&fixture, 8, &[(0, "abcdefgh")]);
+        handle.flags = FileOpenFlags {
+            read: false,
+            ..FileOpenFlags::read_write()
+        };
+
+        let error = handle
+            .pread(&mut [0u8; 4], 0)
+            .expect_err("read should be rejected");
+
+        assert!(error.to_string().contains("cannot read file_id"));
+    }
+
+    #[test]
+    fn unbacked_regions_read_as_zeros() {
+        let fixture = TestDb::new();
+        // Chunk 1 was never written, and chunk 2 holds fewer bytes than the
+        // file claims to cover.
+        let mut handle = open_with_stored_chunks(&fixture, 22, &[(0, "aaaaaaaa"), (2, "cc")]);
+
+        let mut buf = [0xffu8; 22];
+        assert_eq!(handle.pread(&mut buf, 0).expect("pread"), 22);
+        assert_eq!(&buf[..8], b"aaaaaaaa");
+        assert_eq!(&buf[8..16], &[0; 8]);
+        assert_eq!(&buf[16..18], b"cc");
+        assert_eq!(&buf[18..], &[0; 4]);
+    }
+
+    #[test]
+    fn buffered_state_shadows_what_is_stored() {
+        let fixture = TestDb::new();
+        let mut handle = open_with_stored_chunks(&fixture, 16, &[(0, "aaaaaaaa"), (1, "bbbbbbbb")]);
+        handle.deleted_chunks.insert(0);
+        handle.dirty_chunks.insert(1, b"BBBB".to_vec());
+        assert!(format!("{handle:?}").contains("dirty_chunks: [1]"));
+
+        let mut buf = [0xffu8; 16];
+        assert_eq!(handle.pread(&mut buf, 0).expect("pread"), 16);
+        // Chunk 0 is pending deletion; chunk 1's buffered bytes shadow the
+        // stored ones and stop short, so the rest reads as zeros too.
+        assert_eq!(&buf[..8], &[0; 8]);
+        assert_eq!(&buf[8..12], b"BBBB");
+        assert_eq!(&buf[12..], &[0; 4]);
     }
 }
