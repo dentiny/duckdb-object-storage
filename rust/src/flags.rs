@@ -1,43 +1,33 @@
-//! How a file was opened, mirroring the subset of DuckDB's `FileOpenFlags`
-//! that SlateFS acts on.
-
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 
-/// Access mode requested when opening a file.
+/// Access requested when opening a file.
 ///
-/// `read_only` and `write` are tracked separately rather than as one mode
-/// because DuckDB passes them as independent bits; the combinations that make
-/// no sense are rejected when a handle is constructed.
+/// `read` and `write` are independent, exactly as in DuckDB: there is no
+/// read-only bit, only `FILE_FLAGS_READ` without `FILE_FLAGS_WRITE`. A handle
+/// may be opened for either or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileOpenFlags {
-    /// Create the file if no path mapping exists.
-    pub create: bool,
-    /// Allow writes through the handle.
+    /// Allow reads through the handle. DuckDB's `FILE_FLAGS_READ`.
+    pub read: bool,
+    /// Allow writes through the handle. DuckDB's `FILE_FLAGS_WRITE`.
     pub write: bool,
-    /// Reject every mutating operation on the handle.
-    pub read_only: bool,
-    /// Discard the contents of an existing file on open.
+    /// Create the file when no path mapping exists. DuckDB's
+    /// `FILE_FLAGS_FILE_CREATE`.
+    pub create: bool,
+    /// Discard the contents of an existing file on open. Together with
+    /// `create` this is DuckDB's `FILE_FLAGS_FILE_CREATE_NEW`, which creates
+    /// the file and overwrites it if it was already there.
     pub truncate_existing: bool,
 }
 
 impl FileOpenFlags {
-    /// Opens an existing file for reading only.
+    /// Opens an existing file for reading.
     pub fn read_only() -> Self {
         Self {
-            create: false,
+            read: true,
             write: false,
-            read_only: true,
-            truncate_existing: false,
-        }
-    }
-
-    /// Opens a file for writing, creating it when it does not exist.
-    pub fn create_new() -> Self {
-        Self {
-            create: true,
-            write: true,
-            read_only: false,
+            create: false,
             truncate_existing: false,
         }
     }
@@ -45,21 +35,31 @@ impl FileOpenFlags {
     /// Opens an existing file for reading and writing.
     pub fn read_write() -> Self {
         Self {
-            create: false,
+            read: true,
             write: true,
-            read_only: false,
+            create: false,
             truncate_existing: false,
         }
     }
 
-    /// Rejects the bit combinations that contradict each other. DuckDB passes
-    /// the bits independently, so this is checked once when a file is opened
-    /// rather than at every operation that consults them.
+    /// Opens a file for reading and writing, creating it if it is not there.
+    pub fn create() -> Self {
+        Self {
+            read: true,
+            write: true,
+            create: true,
+            truncate_existing: false,
+        }
+    }
+
+    /// Rejects the combinations DuckDB's own `FileOpenFlags::Verify` treats as
+    /// invalid. Checked once when a file is opened rather than at every
+    /// operation that consults the flags.
     pub fn validate(&self, file_id: u64) -> Result<()> {
-        let reason = if self.read_only && self.write {
-            "read_only and write cannot both be set"
-        } else if self.read_only && self.truncate_existing {
-            "read_only and truncate_existing cannot both be set"
+        let reason = if !self.read && !self.write {
+            "at least one of read or write must be set"
+        } else if self.create && !self.write {
+            "create requires write access"
         } else if self.truncate_existing && !self.write {
             "truncate_existing requires write access"
         } else {
@@ -71,98 +71,108 @@ impl FileOpenFlags {
             ErrorStatus::Permanent,
         )))
     }
+
+    /// Rejects a read on a handle opened write-only.
+    pub fn ensure_readable(&self, file_id: u64) -> Result<()> {
+        self.ensure(self.read, "read", file_id)
+    }
+
+    /// Rejects a mutating operation on a handle opened read-only.
+    pub fn ensure_writable(&self, file_id: u64) -> Result<()> {
+        self.ensure(self.write, "write to", file_id)
+    }
+
+    fn ensure(&self, granted: bool, operation: &str, file_id: u64) -> Result<()> {
+        if granted {
+            return Ok(());
+        }
+
+        Err(Error::InvalidArgument(ErrorStruct::new(
+            format!("cannot {operation} file_id {file_id}: not opened for that access"),
+            ErrorStatus::Permanent,
+        )))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn read_only_grants_no_write_access() {
-        let flags = FileOpenFlags::read_only();
-
-        assert!(flags.read_only);
-        assert!(!flags.write);
-        assert!(!flags.create);
-        assert!(!flags.truncate_existing);
-    }
-
-    #[test]
-    fn create_new_grants_write_access_and_creates() {
-        let flags = FileOpenFlags::create_new();
-
-        assert!(flags.create);
-        assert!(flags.write);
-        assert!(!flags.read_only);
-    }
-
-    #[test]
-    fn read_write_grants_write_access_without_creating() {
-        let flags = FileOpenFlags::read_write();
-
-        assert!(!flags.create);
-        assert!(flags.write);
-        assert!(!flags.read_only);
-    }
+    const FILE_ID: u64 = 7;
 
     #[test]
     fn every_constructor_produces_valid_flags() {
         for flags in [
             FileOpenFlags::read_only(),
-            FileOpenFlags::create_new(),
             FileOpenFlags::read_write(),
+            FileOpenFlags::create(),
         ] {
-            flags.validate(7).unwrap_or_else(|_| panic!("{flags:?}"));
+            flags
+                .validate(FILE_ID)
+                .unwrap_or_else(|_| panic!("{flags:?}"));
         }
     }
 
     #[test]
-    fn contradictory_flag_combinations_are_rejected() {
-        let cases = [
-            (
-                FileOpenFlags {
-                    create: false,
-                    write: true,
-                    read_only: true,
-                    truncate_existing: false,
-                },
-                "read_only and write",
-            ),
-            (
-                FileOpenFlags {
-                    create: false,
-                    write: true,
-                    read_only: true,
-                    truncate_existing: true,
-                },
-                "read_only and write",
-            ),
-            (
-                FileOpenFlags {
-                    create: false,
-                    write: false,
-                    read_only: true,
-                    truncate_existing: true,
-                },
-                "read_only and truncate_existing",
-            ),
-            (
-                FileOpenFlags {
-                    create: false,
-                    write: false,
-                    read_only: false,
-                    truncate_existing: true,
-                },
-                "truncate_existing requires write access",
-            ),
-        ];
+    fn access_with_neither_read_nor_write_is_rejected() {
+        let flags = FileOpenFlags {
+            read: false,
+            write: false,
+            create: false,
+            truncate_existing: false,
+        };
 
-        for (flags, expected) in cases {
-            let error = flags.validate(7).expect_err("flags should be rejected");
+        let error = flags
+            .validate(FILE_ID)
+            .expect_err("flags should be rejected");
 
-            assert!(matches!(error, Error::InvalidArgument(_)), "{flags:?}");
-            assert!(error.to_string().contains(expected), "{flags:?}");
-            assert!(error.to_string().contains("file_id 7"), "{flags:?}");
-        }
+        assert!(matches!(error, Error::InvalidArgument(_)));
+        assert!(error.to_string().contains("at least one of read or write"));
+        assert!(error.to_string().contains("file_id 7"));
+    }
+
+    #[test]
+    fn creating_and_truncating_both_require_write_access() {
+        let read_only_create = FileOpenFlags {
+            create: true,
+            ..FileOpenFlags::read_only()
+        };
+        let read_only_truncate = FileOpenFlags {
+            truncate_existing: true,
+            ..FileOpenFlags::read_only()
+        };
+
+        assert!(read_only_create
+            .validate(FILE_ID)
+            .expect_err("create needs write")
+            .to_string()
+            .contains("create requires write access"));
+        assert!(read_only_truncate
+            .validate(FILE_ID)
+            .expect_err("truncate needs write")
+            .to_string()
+            .contains("truncate_existing requires write access"));
+    }
+
+    #[test]
+    fn access_checks_follow_the_granted_bits() {
+        let read_only = FileOpenFlags::read_only();
+        assert!(read_only.ensure_readable(FILE_ID).is_ok());
+        assert!(read_only
+            .ensure_writable(FILE_ID)
+            .expect_err("read-only cannot write")
+            .to_string()
+            .contains("cannot write to file_id 7"));
+
+        let write_only = FileOpenFlags {
+            read: false,
+            ..FileOpenFlags::read_write()
+        };
+        assert!(write_only.ensure_writable(FILE_ID).is_ok());
+        assert!(write_only
+            .ensure_readable(FILE_ID)
+            .expect_err("write-only cannot read")
+            .to_string()
+            .contains("cannot read file_id 7"));
     }
 }
