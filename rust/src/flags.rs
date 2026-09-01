@@ -52,9 +52,8 @@ impl FileOpenFlags {
         }
     }
 
-    /// Rejects the combinations DuckDB's own `FileOpenFlags::Verify` treats as
-    /// invalid. Checked once when a file is opened rather than at every
-    /// operation that consults the flags.
+    /// Rejects the combinations DuckDB's own `FileOpenFlags::Verify` treats as invalid.
+    // Checked once when a file is opened
     pub fn validate(&self, file_id: u64) -> Result<()> {
         let reason = if !self.read && !self.write {
             "at least one of read or write must be set"
