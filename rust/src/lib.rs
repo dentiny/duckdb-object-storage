@@ -7,8 +7,6 @@
 mod error;
 mod error_struct;
 mod ffi;
-// Fully exercised once the remaining file handle operations land.
-#[allow(dead_code)]
 mod file_handle;
 mod flags;
 mod fs;
@@ -16,8 +14,6 @@ mod fs;
 mod keys;
 #[allow(dead_code)]
 mod metadata;
-// Grows into the filesystem the DuckDB adapter delegates to.
-#[allow(dead_code)]
 mod slatefs;
 #[cfg(test)]
 mod test_utils;
