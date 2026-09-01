@@ -26,6 +26,13 @@ pub trait FileSystem {
     /// Opens the file at `path`, creating it when `flags` allow and nothing is
     /// mapped there yet.
     fn open_file(&self, path: &str, flags: FileOpenFlags) -> Result<Box<dyn FileHandle>>;
+
+    /// Deletes the file at `path` along with its metadata and chunks.
+    fn remove_file(&self, path: &str) -> Result<()>;
+
+    /// Renames `src` to `dst`, replacing whatever `dst` named. The file keeps
+    /// its id, so no data moves.
+    fn move_file(&self, src: &str, dst: &str) -> Result<()>;
 }
 
 /// A filesystem backed by one SlateDB instance on an object store.
@@ -59,6 +66,22 @@ impl FileSystem for SlateFs {
             metadata,
             flags,
         )?))
+    }
+
+    fn remove_file(&self, path: &str) -> Result<()> {
+        validate_path(path, "file")?;
+        self.runtime.block_on(self.remove_file_impl(path))
+    }
+
+    fn move_file(&self, src: &str, dst: &str) -> Result<()> {
+        validate_path(src, "source")?;
+        validate_path(dst, "destination")?;
+
+        if src == dst {
+            return Ok(());
+        }
+
+        self.runtime.block_on(self.move_file_impl(src, dst))
     }
 }
 
@@ -131,6 +154,61 @@ impl SlateFs {
 
         txn.commit().await?;
         Ok(resolved)
+    }
+
+    async fn remove_file_impl(&self, path: &str) -> Result<()> {
+        let txn = self.begin_txn().await?;
+
+        let file_id = Self::lookup_file_id(&txn, path).await?.ok_or_else(|| {
+            Error::FileNotFound(ErrorStruct::new(
+                format!("file not found: {path}"),
+                ErrorStatus::Permanent,
+            ))
+        })?;
+
+        Self::delete_file_data(&txn, file_id).await?;
+        txn.delete(keys::path_key(path))?;
+        txn.commit().await?;
+        Ok(())
+    }
+
+    async fn move_file_impl(&self, src: &str, dst: &str) -> Result<()> {
+        let txn = self.begin_txn().await?;
+
+        let src_file_id = Self::lookup_file_id(&txn, src).await?.ok_or_else(|| {
+            Error::FileNotFound(ErrorStruct::new(
+                format!("file not found: {src}"),
+                ErrorStatus::Permanent,
+            ))
+        })?;
+
+        // The destination is about to stop naming its current file, so its
+        // data goes with it; nothing else refers to that id.
+        let replaced = Self::lookup_file_id(&txn, dst)
+            .await?
+            .filter(|dst_file_id| *dst_file_id != src_file_id);
+        if let Some(dst_file_id) = replaced {
+            Self::delete_file_data(&txn, dst_file_id).await?;
+        }
+
+        txn.put(keys::path_key(dst), src_file_id.to_le_bytes())?;
+        txn.delete(keys::path_key(src))?;
+        txn.commit().await?;
+        Ok(())
+    }
+
+    /// Stages the deletion of a file's metadata and every one of its chunks.
+    ///
+    /// The chunks are scanned rather than derived from the recorded size, so a
+    /// sparse file with gaps in its indices leaves nothing behind.
+    async fn delete_file_data(txn: &DbTransaction, file_id: u64) -> Result<()> {
+        let mut chunks = txn.scan_prefix(keys::chunk_prefix(file_id), ..).await?;
+        while let Some(entry) = chunks.next().await? {
+            txn.delete(entry.key)?;
+        }
+
+        txn.delete(keys::metadata_key(file_id))?;
+        Ok(())
     }
 
     /// Stages the creation of an empty file at `path` in `txn`.
@@ -356,6 +434,150 @@ mod tests {
             .expect_err("empty path");
 
         assert!(error.to_string().contains("file path must not be empty"));
+        fs.close().expect("close");
+    }
+
+    /// Every key stored for `file_id`, so a test can assert nothing is left.
+    fn stored_keys(fs: &SlateFs, file_id: u64) -> Vec<Vec<u8>> {
+        fs.runtime.block_on(async {
+            let mut keys = Vec::new();
+            for prefix in [keys::chunk_prefix(file_id), keys::metadata_key(file_id)] {
+                let mut iter = fs.db.scan_prefix(prefix, ..).await.expect("scan");
+                while let Some(entry) = iter.next().await.expect("next") {
+                    keys.push(entry.key.to_vec());
+                }
+            }
+            keys
+        })
+    }
+
+    fn write_file(fs: &SlateFs, path: &str, contents: &[u8]) -> u64 {
+        let mut handle = fs.open_file(path, FileOpenFlags::create()).expect("create");
+        handle.write(contents).expect("write");
+        handle.sync().expect("sync");
+        handle.file_id()
+    }
+
+    #[test]
+    fn removing_a_file_leaves_none_of_it_behind() {
+        let fs = open_fs();
+        let file_id = write_file(&fs, "duck.db", b"quack");
+
+        fs.remove_file("duck.db").expect("remove");
+
+        assert!(!fs.file_exists("duck.db").expect("file_exists"));
+        assert!(stored_keys(&fs, file_id).is_empty());
+        fs.close().expect("close");
+    }
+
+    #[test]
+    fn removing_a_file_frees_its_path_for_a_new_one() {
+        let fs = open_fs();
+        let first_id = write_file(&fs, "duck.db", b"quack");
+        fs.remove_file("duck.db").expect("remove");
+
+        let recreated = fs
+            .open_file("duck.db", FileOpenFlags::create())
+            .expect("recreate");
+
+        // A fresh id, so the recreated file cannot inherit stale chunks.
+        assert_ne!(recreated.file_id(), first_id);
+        assert_eq!(recreated.file_size(), 0);
+        drop(recreated);
+        fs.close().expect("close");
+    }
+
+    #[test]
+    fn removing_a_missing_file_fails() {
+        let fs = open_fs();
+
+        let error = fs
+            .remove_file("ghost.db")
+            .expect_err("file should not exist");
+
+        assert!(matches!(error, Error::FileNotFound(_)));
+        fs.close().expect("close");
+    }
+
+    #[test]
+    fn moving_a_file_rebinds_the_path_without_moving_data() {
+        let fs = open_fs();
+        let file_id = write_file(&fs, "src.db", b"quack");
+
+        fs.move_file("src.db", "dst.db").expect("move");
+
+        assert!(!fs.file_exists("src.db").expect("file_exists"));
+        let mut moved = fs
+            .open_file("dst.db", FileOpenFlags::read_only())
+            .expect("open");
+        assert_eq!(moved.file_id(), file_id);
+        let mut buf = [0u8; 5];
+        assert_eq!(moved.read(&mut buf).expect("read"), 5);
+        assert_eq!(&buf, b"quack");
+
+        drop(moved);
+        fs.close().expect("close");
+    }
+
+    #[test]
+    fn moving_onto_an_existing_file_replaces_it_and_frees_its_data() {
+        let fs = open_fs();
+        let src_id = write_file(&fs, "src.db", b"src");
+        let dst_id = write_file(&fs, "dst.db", b"destination");
+
+        fs.move_file("src.db", "dst.db").expect("move");
+
+        assert!(stored_keys(&fs, dst_id).is_empty(), "replaced file is gone");
+        let moved = fs
+            .open_file("dst.db", FileOpenFlags::read_only())
+            .expect("open");
+        assert_eq!(moved.file_id(), src_id);
+        // The destination's longer contents did not survive under the new id.
+        assert_eq!(moved.file_size(), 3);
+
+        drop(moved);
+        fs.close().expect("close");
+    }
+
+    #[test]
+    fn moving_a_file_onto_itself_keeps_it() {
+        let fs = open_fs();
+        let file_id = write_file(&fs, "duck.db", b"quack");
+
+        fs.move_file("duck.db", "duck.db").expect("move");
+
+        assert!(fs.file_exists("duck.db").expect("file_exists"));
+        assert!(!stored_keys(&fs, file_id).is_empty());
+        fs.close().expect("close");
+    }
+
+    #[test]
+    fn moving_a_missing_file_fails_and_leaves_the_destination_alone() {
+        let fs = open_fs();
+        write_file(&fs, "dst.db", b"destination");
+
+        let error = fs
+            .move_file("ghost.db", "dst.db")
+            .expect_err("source should not exist");
+
+        assert!(matches!(error, Error::FileNotFound(_)));
+        assert!(fs.file_exists("dst.db").expect("file_exists"));
+        fs.close().expect("close");
+    }
+
+    #[test]
+    fn move_file_rejects_empty_paths() {
+        let fs = open_fs();
+        write_file(&fs, "src.db", b"src");
+
+        let error = fs.move_file("src.db", "").expect_err("empty destination");
+        assert!(error
+            .to_string()
+            .contains("destination path must not be empty"));
+
+        let error = fs.move_file("", "dst.db").expect_err("empty source");
+        assert!(error.to_string().contains("source path must not be empty"));
+
         fs.close().expect("close");
     }
 }
