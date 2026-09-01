@@ -12,9 +12,11 @@ use slatedb::Db;
 use tokio::runtime::Runtime;
 
 use crate::error::{Error, Result};
+use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::flags::FileOpenFlags;
 use crate::keys;
 use crate::metadata::FileMetadata;
+use crate::util::current_time_millis;
 
 /// The operations DuckDB's `FileHandle` needs from a SlateFS file.
 pub trait FileHandle: Debug {
@@ -46,6 +48,11 @@ pub trait FileHandle: Debug {
     /// Regions the file covers but no chunk backs read as zeros, so a file
     /// written sparsely reads back as if it had been zero-filled.
     fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize>;
+
+    /// Writes `data` at `offset`, extending the file if it runs past the end.
+    /// The bytes are buffered in the handle; they are visible to this handle's
+    /// reads immediately, and are persisted by a later flush.
+    fn pwrite(&mut self, data: &[u8], offset: u64) -> Result<()>;
 }
 
 /// A file opened against a SlateDB instance.
@@ -67,6 +74,7 @@ pub struct SlateFileHandle {
     dirty_chunks: BTreeMap<u64, Vec<u8>>,
     /// Chunk indices whose persisted contents are pending deletion.
     deleted_chunks: BTreeSet<u64>,
+    metadata_dirty: bool,
     flags: FileOpenFlags,
 }
 
@@ -103,12 +111,55 @@ impl SlateFileHandle {
             chunk_size,
             dirty_chunks: BTreeMap::new(),
             deleted_chunks: BTreeSet::new(),
+            metadata_dirty: false,
             flags,
         })
     }
 
     fn chunk_size_u64(&self) -> u64 {
         self.chunk_size as u64
+    }
+
+    fn set_metadata_dirty(&mut self) {
+        self.modified_at_ms = current_time_millis();
+        self.metadata_dirty = true;
+    }
+
+    /// Reads one chunk, honouring the buffered deletions that make a stored
+    /// chunk invisible.
+    fn read_chunk_from_store(&self, chunk_index: u64) -> Result<Vec<u8>> {
+        if self.deleted_chunks.contains(&chunk_index) {
+            return Ok(Vec::new());
+        }
+
+        Ok(self
+            .read_chunks_from_store(&[chunk_index])?
+            .pop()
+            .unwrap_or_default())
+    }
+
+    /// Returns the buffered chunk to write into, reading the stored contents
+    /// first unless the write is about to replace the whole chunk anyway.
+    fn chunk_for_write(
+        &mut self,
+        chunk_index: u64,
+        overwrites_chunk: bool,
+    ) -> Result<&mut Vec<u8>> {
+        if !self.dirty_chunks.contains_key(&chunk_index) {
+            let contents = if overwrites_chunk {
+                vec![0; self.chunk_size]
+            } else {
+                self.read_chunk_from_store(chunk_index)?
+            };
+            self.dirty_chunks.insert(chunk_index, contents);
+        }
+
+        // A chunk is no longer pending deletion once it is written to again.
+        self.deleted_chunks.remove(&chunk_index);
+        Ok(self
+            .dirty_chunks
+            .get_mut(&chunk_index)
+            .expect("chunk was just buffered"))
     }
 
     /// Fetches the given chunks concurrently, in the order requested. A chunk
@@ -208,6 +259,48 @@ impl FileHandle for SlateFileHandle {
 
     fn flags(&self) -> FileOpenFlags {
         self.flags
+    }
+
+    fn pwrite(&mut self, data: &[u8], offset: u64) -> Result<()> {
+        self.flags.ensure_writable(self.file_id)?;
+
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let end_offset = offset.checked_add(data.len() as u64).ok_or_else(|| {
+            Error::InvalidArgument(ErrorStruct::new(
+                format!(
+                    "write past the end of the address space for file_id {}",
+                    self.file_id
+                ),
+                ErrorStatus::Permanent,
+            ))
+        })?;
+
+        let mut written = 0usize;
+        while written < data.len() {
+            let current_offset = offset + written as u64;
+            let chunk_index = current_offset / self.chunk_size_u64();
+            let chunk_offset = (current_offset % self.chunk_size_u64()) as usize;
+            let to_copy = (data.len() - written).min(self.chunk_size - chunk_offset);
+            let required_len = chunk_offset + to_copy;
+
+            let chunk = self.chunk_for_write(
+                chunk_index,
+                required_len == self.chunk_size && chunk_offset == 0,
+            )?;
+            if chunk.len() < required_len {
+                chunk.resize(required_len, 0);
+            }
+            chunk[chunk_offset..required_len].copy_from_slice(&data[written..written + to_copy]);
+
+            written += to_copy;
+        }
+
+        self.size = self.size.max(end_offset);
+        self.set_metadata_dirty();
+        Ok(())
     }
 
     fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
@@ -431,5 +524,125 @@ mod tests {
         assert_eq!(&buf[..8], &[0; 8]);
         assert_eq!(&buf[8..12], b"BBBB");
         assert_eq!(&buf[12..], &[0; 4]);
+    }
+
+    /// Opens an empty writable handle over its own database.
+    fn open_writable(fixture: &TestDb) -> SlateFileHandle {
+        open(
+            fixture,
+            FileMetadata {
+                size: 0,
+                modified_at_ms: 0,
+                chunk_size: TEST_CHUNK_SIZE,
+            },
+            FileOpenFlags::create(),
+        )
+        .expect("handle")
+    }
+
+    #[test]
+    fn writes_are_visible_to_reads_while_still_buffered() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+
+        handle.pwrite(b"hello", 0).expect("pwrite");
+
+        assert_eq!(handle.file_size(), 5);
+        assert!(handle.metadata_dirty);
+        let mut buf = [0u8; 5];
+        assert_eq!(handle.pread(&mut buf, 0).expect("pread"), 5);
+        assert_eq!(&buf, b"hello");
+    }
+
+    #[test]
+    fn writes_spanning_chunks_are_split_across_them() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+
+        handle.pwrite(b"0123456789abcdefghij", 4).expect("pwrite");
+
+        assert_eq!(handle.file_size(), 24);
+        // The hole ahead of the write is zero-filled, not left short.
+        assert_eq!(
+            handle.dirty_chunks[&0],
+            [&[0u8; 4], b"0123".as_slice()].concat()
+        );
+        assert_eq!(handle.dirty_chunks[&1], b"456789ab");
+        assert_eq!(handle.dirty_chunks[&2], b"cdefghij");
+    }
+
+    #[test]
+    fn writes_merge_into_an_already_buffered_chunk() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+
+        handle.pwrite(b"aaaa", 0).expect("pwrite");
+        handle.pwrite(b"bb", 2).expect("pwrite");
+
+        let mut buf = [0u8; 4];
+        handle.pread(&mut buf, 0).expect("pread");
+        assert_eq!(&buf, b"aabb");
+    }
+
+    #[test]
+    fn writes_merge_into_a_stored_chunk() {
+        let fixture = TestDb::new();
+        let mut handle = open_with_stored_chunks(&fixture, 8, &[(0, "abcdefgh")]);
+        handle.flags = FileOpenFlags::read_write();
+
+        handle.pwrite(b"XY", 3).expect("pwrite");
+
+        assert_eq!(handle.dirty_chunks[&0], b"abcXYfgh");
+    }
+
+    #[test]
+    fn writing_a_deleted_chunk_brings_it_back() {
+        let fixture = TestDb::new();
+        let mut handle = open_with_stored_chunks(&fixture, 8, &[(0, "abcdefgh")]);
+        handle.flags = FileOpenFlags::read_write();
+        handle.deleted_chunks.insert(0);
+
+        handle.pwrite(b"zz", 0).expect("pwrite");
+
+        // The chunk is no longer pending deletion, and the bytes it held
+        // before deletion stay gone.
+        assert!(handle.deleted_chunks.is_empty());
+        assert_eq!(handle.dirty_chunks[&0], b"zz");
+    }
+
+    #[test]
+    fn empty_writes_leave_the_file_untouched() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+
+        handle.pwrite(b"", 100).expect("pwrite");
+
+        assert_eq!(handle.file_size(), 0);
+        assert!(!handle.metadata_dirty);
+    }
+
+    #[test]
+    fn read_only_handles_reject_writes() {
+        let fixture = TestDb::new();
+        let mut handle = open_with_stored_chunks(&fixture, 8, &[(0, "abcdefgh")]);
+
+        let error = handle
+            .pwrite(b"x", 0)
+            .expect_err("write should be rejected");
+
+        assert!(matches!(error, Error::InvalidArgument(_)));
+        assert!(error.to_string().contains("cannot write to file_id"));
+    }
+
+    #[test]
+    fn writes_past_the_end_of_the_address_space_are_rejected() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+
+        let error = handle
+            .pwrite(b"xy", u64::MAX)
+            .expect_err("write should be rejected");
+
+        assert!(matches!(error, Error::InvalidArgument(_)));
     }
 }
