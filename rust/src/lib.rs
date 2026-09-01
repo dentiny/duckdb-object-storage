@@ -16,6 +16,9 @@ mod fs;
 mod keys;
 #[allow(dead_code)]
 mod metadata;
+// Grows into the filesystem the DuckDB adapter delegates to.
+#[allow(dead_code)]
+mod slatefs;
 #[cfg(test)]
 mod test_utils;
 #[allow(dead_code)]
@@ -26,3 +29,4 @@ pub use error_struct::{ErrorStatus, ErrorStruct};
 pub use file_handle::{FileHandle, SlateFileHandle};
 pub use flags::FileOpenFlags;
 pub use fs::SlateDbFileSystem;
+pub use slatefs::{FileSystem, SlateFs};
