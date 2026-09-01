@@ -69,6 +69,10 @@ pub trait FileHandle: Debug {
 
     /// Writes at the current position and advances it past the written bytes.
     fn write(&mut self, data: &[u8]) -> Result<usize>;
+
+    /// Resizes the file to `new_size`. Growing leaves the new region unbacked,
+    /// so it reads as zeros; shrinking discards the chunks past the new end.
+    fn truncate(&mut self, new_size: u64) -> Result<()>;
 }
 
 /// A file opened against a SlateDB instance.
@@ -117,7 +121,7 @@ impl SlateFileHandle {
         flags.validate(file_id)?;
         let chunk_size = metadata.validated_chunk_size(file_id)?;
 
-        Ok(Self {
+        let mut handle = Self {
             db,
             runtime,
             file_id,
@@ -129,7 +133,80 @@ impl SlateFileHandle {
             deleted_chunks: BTreeSet::new(),
             metadata_dirty: false,
             flags,
-        })
+        };
+
+        if flags.truncate_existing && handle.size > 0 {
+            handle.truncate_to(0)?;
+        }
+
+        Ok(handle)
+    }
+
+    /// Truncates without checking the open flags, so opening with
+    /// `truncate_existing` can reuse it before the handle is handed out.
+    fn truncate_to(&mut self, new_size: u64) -> Result<()> {
+        if new_size == self.size {
+            return Ok(());
+        }
+
+        // Growing backs nothing new: the added region has no chunks, which is
+        // exactly how `pread` renders a hole.
+        if new_size > self.size {
+            self.size = new_size;
+            self.set_metadata_dirty();
+            return Ok(());
+        }
+
+        if new_size == 0 {
+            self.dirty_chunks.clear();
+            self.discard_persisted_chunks_from(0)?;
+            self.size = 0;
+            self.set_metadata_dirty();
+            return Ok(());
+        }
+
+        let last_byte = new_size - 1;
+        let last_chunk = last_byte / self.chunk_size_u64();
+        let last_len = (last_byte % self.chunk_size_u64()) as usize + 1;
+
+        self.dirty_chunks
+            .retain(|chunk_index, _| *chunk_index <= last_chunk);
+        match self.dirty_chunks.get_mut(&last_chunk) {
+            Some(chunk) => chunk.truncate(last_len),
+            None => {
+                // The surviving prefix of a stored tail chunk has to be
+                // buffered, since the chunk itself is about to be rewritten.
+                let mut stored = self.read_chunk_from_store(last_chunk)?;
+                if stored.len() > last_len {
+                    stored.truncate(last_len);
+                    self.dirty_chunks.insert(last_chunk, stored);
+                }
+            }
+        }
+        self.discard_persisted_chunks_from(last_chunk + 1)?;
+
+        self.size = new_size;
+        self.set_metadata_dirty();
+        Ok(())
+    }
+
+    /// Marks every stored chunk from `first_chunk` onwards for deletion.
+    fn discard_persisted_chunks_from(&mut self, first_chunk: u64) -> Result<()> {
+        let prefix = keys::chunk_prefix(self.file_id);
+        let stale = self.runtime.block_on(async {
+            let mut iter = self.db.scan_prefix(prefix, ..).await?;
+            let mut chunk_indices = Vec::new();
+            while let Some(entry) = iter.next().await? {
+                let chunk_index = parse_chunk_index(&entry.key)?;
+                if chunk_index >= first_chunk {
+                    chunk_indices.push(chunk_index);
+                }
+            }
+            Ok::<Vec<u64>, Error>(chunk_indices)
+        })?;
+
+        self.deleted_chunks.extend(stale);
+        Ok(())
     }
 
     fn chunk_size_u64(&self) -> u64 {
@@ -232,6 +309,24 @@ impl SlateFileHandle {
 
         persisted_reads
     }
+}
+
+/// Reads the chunk index back out of a key built by [`keys::chunk_key`].
+fn parse_chunk_index(key: &[u8]) -> Result<u64> {
+    let malformed = |reason: &str| {
+        Error::MetadataDecode(ErrorStruct::new(
+            format!("invalid chunk key: {reason}"),
+            ErrorStatus::Permanent,
+        ))
+    };
+
+    let key = std::str::from_utf8(key).map_err(|_| malformed("not valid utf-8"))?;
+    let (_, chunk_index) = key
+        .rsplit_once('/')
+        .ok_or_else(|| malformed(&format!("{key} has no chunk index")))?;
+
+    u64::from_str_radix(chunk_index, 16)
+        .map_err(|_| malformed(&format!("{key} has a non-hex chunk index")))
 }
 
 /// Copies what `chunk` can supply into `buf`, leaving the rest untouched. A
@@ -361,6 +456,11 @@ impl FileHandle for SlateFileHandle {
 
     fn close(&mut self) -> Result<()> {
         self.sync()
+    }
+
+    fn truncate(&mut self, new_size: u64) -> Result<()> {
+        self.flags.ensure_writable(self.file_id)?;
+        self.truncate_to(new_size)
     }
 
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
@@ -857,5 +957,123 @@ mod tests {
 
         assert!(matches!(error, Error::InvalidArgument(_)));
         assert_eq!(handle.seek_position(), 0);
+    }
+
+    #[test]
+    fn truncating_to_zero_discards_every_chunk() {
+        let fixture = TestDb::new();
+        let mut handle = open_with_stored_chunks(&fixture, 16, &[(0, "aaaaaaaa"), (1, "bbbbbbbb")]);
+        handle.flags = FileOpenFlags::read_write();
+        handle.pwrite(b"cc", 8).expect("pwrite");
+
+        handle.truncate(0).expect("truncate");
+        handle.sync().expect("sync");
+
+        assert_eq!(handle.file_size(), 0);
+        assert!(handle.dirty_chunks.is_empty());
+        assert!(stored_chunk(&fixture, 0).is_none());
+        assert!(stored_chunk(&fixture, 1).is_none());
+    }
+
+    #[test]
+    fn truncating_down_shortens_the_tail_chunk_and_drops_the_rest() {
+        let fixture = TestDb::new();
+        let mut handle = open_with_stored_chunks(
+            &fixture,
+            24,
+            &[(0, "aaaaaaaa"), (1, "bbbbbbbb"), (2, "cccccccc")],
+        );
+        handle.flags = FileOpenFlags::read_write();
+
+        handle.truncate(11).expect("truncate");
+        handle.sync().expect("sync");
+
+        assert_eq!(handle.file_size(), 11);
+        assert_eq!(stored_chunk(&fixture, 0).unwrap(), b"aaaaaaaa");
+        assert_eq!(stored_chunk(&fixture, 1).unwrap(), b"bbb");
+        assert!(stored_chunk(&fixture, 2).is_none());
+    }
+
+    #[test]
+    fn truncating_down_shortens_a_buffered_tail_chunk() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+        handle.write(b"0123456789ab").expect("write");
+
+        handle.truncate(10).expect("truncate");
+
+        assert_eq!(handle.dirty_chunks[&1], b"89");
+        let mut buf = [0u8; 12];
+        assert_eq!(handle.pread(&mut buf, 0).expect("pread"), 10);
+    }
+
+    #[test]
+    fn truncating_up_leaves_the_new_region_reading_as_zeros() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+        handle.write(b"abc").expect("write");
+
+        handle.truncate(10).expect("truncate");
+
+        assert_eq!(handle.file_size(), 10);
+        let mut buf = [0xffu8; 10];
+        assert_eq!(handle.pread(&mut buf, 0).expect("pread"), 10);
+        assert_eq!(&buf[..3], b"abc");
+        assert_eq!(&buf[3..], &[0; 7]);
+    }
+
+    #[test]
+    fn truncating_to_the_current_size_changes_nothing() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+        handle.write(b"abc").expect("write");
+        handle.sync().expect("sync");
+
+        handle.truncate(3).expect("truncate");
+
+        assert!(!handle.metadata_dirty);
+    }
+
+    #[test]
+    fn opening_with_truncate_existing_empties_a_stored_file() {
+        let fixture = TestDb::new();
+        let handle = open(
+            &fixture,
+            FileMetadata {
+                size: 16,
+                modified_at_ms: 0,
+                chunk_size: TEST_CHUNK_SIZE,
+            },
+            FileOpenFlags {
+                truncate_existing: true,
+                ..FileOpenFlags::read_write()
+            },
+        )
+        .expect("handle");
+
+        assert_eq!(handle.file_size(), 0);
+        assert!(handle.metadata_dirty);
+    }
+
+    #[test]
+    fn read_only_handles_reject_truncate() {
+        let fixture = TestDb::new();
+        let mut handle = open_with_stored_chunks(&fixture, 8, &[(0, "abcdefgh")]);
+
+        let error = handle.truncate(0).expect_err("truncate should be rejected");
+
+        assert!(matches!(error, Error::InvalidArgument(_)));
+        assert_eq!(handle.file_size(), 8);
+    }
+
+    #[test]
+    fn chunk_indices_round_trip_through_their_keys() {
+        assert_eq!(
+            parse_chunk_index(&keys::chunk_key(3, 42)).expect("index"),
+            42
+        );
+        assert!(parse_chunk_index(b"c/0000000000000003/zzzz").is_err());
+        assert!(parse_chunk_index(b"no-separator").is_err());
+        assert!(parse_chunk_index(b"c/\xff/0").is_err());
     }
 }
