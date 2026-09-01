@@ -62,6 +62,13 @@ pub trait FileHandle: Debug {
     /// so it can be called through the `dyn FileHandle` the filesystem hands
     /// out, which is where DuckDB's `FileHandle::Close` will reach it.
     fn close(&mut self) -> Result<()>;
+
+    /// Reads from the current position and advances it by the number of bytes
+    /// read, which is 0 once the position is at or past the end of the file.
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
+
+    /// Writes at the current position and advances it past the written bytes.
+    fn write(&mut self, data: &[u8]) -> Result<usize>;
 }
 
 /// A file opened against a SlateDB instance.
@@ -354,6 +361,20 @@ impl FileHandle for SlateFileHandle {
 
     fn close(&mut self) -> Result<()> {
         self.sync()
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let bytes_read = self.pread(buf, self.position)?;
+        self.position += bytes_read as u64;
+        Ok(bytes_read)
+    }
+
+    fn write(&mut self, data: &[u8]) -> Result<usize> {
+        self.pwrite(data, self.position)?;
+        // `pwrite` already rejected a write that would run past the end of the
+        // address space, so the position cannot overflow here.
+        self.position += data.len() as u64;
+        Ok(data.len())
     }
 
     fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
@@ -763,5 +784,78 @@ mod tests {
         // Nothing is left buffered, so closing again is a no-op rather than
         // a second write or a failure.
         FileHandle::close(&mut handle).expect("close again");
+    }
+
+    #[test]
+    fn sequential_writes_append_at_the_moving_position() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+
+        assert_eq!(handle.write(b"hello ").expect("write"), 6);
+        assert_eq!(handle.write(b"world").expect("write"), 5);
+
+        assert_eq!(handle.seek_position(), 11);
+        assert_eq!(handle.file_size(), 11);
+    }
+
+    #[test]
+    fn sequential_reads_walk_the_file_and_stop_at_the_end() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+        handle.write(b"hello world").expect("write");
+        handle.reset();
+
+        let mut buf = [0u8; 6];
+        assert_eq!(handle.read(&mut buf).expect("read"), 6);
+        assert_eq!(&buf, b"hello ");
+        assert_eq!(handle.seek_position(), 6);
+
+        // Only five bytes are left, so the read is short and the position
+        // lands exactly on the end of the file.
+        assert_eq!(handle.read(&mut buf).expect("read"), 5);
+        assert_eq!(&buf[..5], b"world");
+        assert_eq!(handle.seek_position(), 11);
+
+        assert_eq!(handle.read(&mut buf).expect("read"), 0);
+        assert_eq!(handle.seek_position(), 11);
+    }
+
+    #[test]
+    fn seek_redirects_sequential_io() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+        handle.write(b"aaaaaaaaaaaa").expect("write");
+
+        handle.seek(4);
+        handle.write(b"BB").expect("write");
+        handle.seek(3);
+
+        let mut buf = [0u8; 4];
+        assert_eq!(handle.read(&mut buf).expect("read"), 4);
+        assert_eq!(&buf, b"aBBa");
+        assert_eq!(handle.file_size(), 12, "an interior write does not extend");
+    }
+
+    #[test]
+    fn reading_from_beyond_the_end_of_the_file_returns_nothing() {
+        let fixture = TestDb::new();
+        let mut handle = open_writable(&fixture);
+        handle.write(b"hello").expect("write");
+        handle.seek(9999);
+
+        let mut buf = [0u8; 4];
+        assert_eq!(handle.read(&mut buf).expect("read"), 0);
+        assert_eq!(handle.seek_position(), 9999);
+    }
+
+    #[test]
+    fn read_only_handles_reject_sequential_writes() {
+        let fixture = TestDb::new();
+        let mut handle = open_with_stored_chunks(&fixture, 8, &[(0, "abcdefgh")]);
+
+        let error = handle.write(b"x").expect_err("write should be rejected");
+
+        assert!(matches!(error, Error::InvalidArgument(_)));
+        assert_eq!(handle.seek_position(), 0);
     }
 }
