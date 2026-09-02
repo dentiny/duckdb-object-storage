@@ -12,8 +12,6 @@ pub struct FileOpenFlags {
     pub write: bool,
     /// Create the file when it does not exist.
     pub create: bool,
-    /// Discard the contents of an existing file on open.
-    pub truncate_existing: bool,
 }
 
 impl FileOpenFlags {
@@ -23,7 +21,6 @@ impl FileOpenFlags {
             read: true,
             write: false,
             create: false,
-            truncate_existing: false,
         }
     }
 
@@ -33,7 +30,6 @@ impl FileOpenFlags {
             read: true,
             write: true,
             create: false,
-            truncate_existing: false,
         }
     }
 
@@ -43,7 +39,6 @@ impl FileOpenFlags {
             read: true,
             write: true,
             create: true,
-            truncate_existing: false,
         }
     }
 
@@ -53,8 +48,6 @@ impl FileOpenFlags {
             "at least one of read or write must be set"
         } else if self.create && !self.write {
             "create requires write access"
-        } else if self.truncate_existing && !self.write {
-            "truncate_existing requires write access"
         } else {
             return Ok(());
         };
@@ -112,7 +105,6 @@ mod tests {
             read: false,
             write: false,
             create: false,
-            truncate_existing: false,
         };
 
         let error = flags
@@ -125,13 +117,9 @@ mod tests {
     }
 
     #[test]
-    fn creating_and_truncating_both_require_write_access() {
+    fn create_requires_write_access() {
         let read_only_create = FileOpenFlags {
             create: true,
-            ..FileOpenFlags::read_only()
-        };
-        let read_only_truncate = FileOpenFlags {
-            truncate_existing: true,
             ..FileOpenFlags::read_only()
         };
 
@@ -140,11 +128,6 @@ mod tests {
             .expect_err("create needs write")
             .to_string()
             .contains("create requires write access"));
-        assert!(read_only_truncate
-            .validate(FILE_ID)
-            .expect_err("truncate needs write")
-            .to_string()
-            .contains("truncate_existing requires write access"));
     }
 
     #[test]
