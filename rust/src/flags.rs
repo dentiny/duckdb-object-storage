@@ -3,21 +3,16 @@ use crate::error_struct::{ErrorStatus, ErrorStruct};
 
 /// Access requested when opening a file.
 ///
-/// `read` and `write` are independent, exactly as in DuckDB: there is no
-/// read-only bit, only `FILE_FLAGS_READ` without `FILE_FLAGS_WRITE`. A handle
-/// may be opened for either or both.
+/// `read` and `write` are independent flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileOpenFlags {
-    /// Allow reads through the handle. DuckDB's `FILE_FLAGS_READ`.
+    /// Allow reads through the handle.
     pub read: bool,
-    /// Allow writes through the handle. DuckDB's `FILE_FLAGS_WRITE`.
+    /// Allow writes through the handle.
     pub write: bool,
-    /// Create the file when no path mapping exists. DuckDB's
-    /// `FILE_FLAGS_FILE_CREATE`.
+    /// Create the file when it does not exist.
     pub create: bool,
-    /// Discard the contents of an existing file on open. Together with
-    /// `create` this is DuckDB's `FILE_FLAGS_FILE_CREATE_NEW`, which creates
-    /// the file and overwrites it if it was already there.
+    /// Discard the contents of an existing file on open.
     pub truncate_existing: bool,
 }
 
@@ -52,8 +47,7 @@ impl FileOpenFlags {
         }
     }
 
-    /// DuckDB's `FileOpenFlags::Verify` treats some combinations as invalid.
-    // Checked once when a file is opened
+    /// Rejects invalid flag combinations.
     pub fn validate(&self, file_id: u64) -> Result<()> {
         let reason = if !self.read && !self.write {
             "at least one of read or write must be set"
