@@ -2,6 +2,8 @@
 
 use prost::Message;
 
+use crate::error::{Error, Result};
+use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::util::current_time_millis;
 
 /// Matches DuckDB's `DEFAULT_BLOCK_ALLOC_SIZE` of 262144.
@@ -22,8 +24,27 @@ impl FileMetadata {
         self.encode_to_vec()
     }
 
-    pub(crate) fn decode_from_bytes(bytes: &[u8]) -> Result<Self, prost::DecodeError> {
-        Self::decode(bytes)
+    pub(crate) fn decode_from_bytes(bytes: &[u8]) -> Result<Self> {
+        Ok(Self::decode(bytes)?)
+    }
+
+    /// Returns the chunk size as a `usize`, rejecting values that would break
+    /// the offset arithmetic built on it. The record comes back from storage,
+    /// so a zero would divide by zero on every read and a value past `usize`
+    /// would overflow; neither is worth discovering mid-operation.
+    pub(crate) fn validated_chunk_size(&self, file_id: u64) -> Result<usize> {
+        let invalid = |reason: String| {
+            Error::InvalidArgument(ErrorStruct::new(
+                format!("invalid chunk size for file_id {file_id}: {reason}"),
+                ErrorStatus::Permanent,
+            ))
+        };
+
+        if self.chunk_size == 0 {
+            return Err(invalid("must be non-zero".to_string()));
+        }
+        usize::try_from(self.chunk_size)
+            .map_err(|_| invalid(format!("{} exceeds usize", self.chunk_size)))
     }
 }
 
@@ -47,8 +68,39 @@ mod tests {
 
     #[test]
     fn malformed_metadata_is_rejected() {
-        let error = FileMetadata::decode_from_bytes(&[0x08, 0x80]);
+        let error = FileMetadata::decode_from_bytes(&[0x08, 0x80])
+            .expect_err("truncated varint should not decode");
 
-        assert!(error.is_err());
+        assert!(matches!(error, Error::MetadataDecode(_)));
+        assert_eq!(error.status(), ErrorStatus::Permanent);
+    }
+
+    #[test]
+    fn new_metadata_starts_empty_at_the_default_chunk_size() {
+        let metadata = FileMetadata::new();
+
+        assert_eq!(metadata.size, 0);
+        assert_eq!(metadata.chunk_size, DEFAULT_CHUNK_SIZE);
+        assert!(metadata.modified_at_ms > 0);
+        assert_eq!(
+            metadata.validated_chunk_size(7).expect("chunk size"),
+            DEFAULT_CHUNK_SIZE as usize
+        );
+    }
+
+    #[test]
+    fn zero_chunk_size_is_rejected() {
+        let metadata = FileMetadata {
+            size: 0,
+            modified_at_ms: 0,
+            chunk_size: 0,
+        };
+
+        let error = metadata
+            .validated_chunk_size(7)
+            .expect_err("zero chunk size should be rejected");
+
+        assert!(matches!(error, Error::InvalidArgument(_)));
+        assert!(error.to_string().contains("file_id 7: must be non-zero"));
     }
 }
