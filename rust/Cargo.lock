@@ -1448,6 +1448,7 @@ name = "slatedb-fs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures",
  "prost",
  "prost-build",
  "protoc-bin-vendored",
