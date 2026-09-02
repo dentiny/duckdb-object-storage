@@ -71,6 +71,8 @@ pub struct SlateFileHandle {
     deleted_chunks: BTreeSet<u64>,
     metadata_dirty: bool,
     flags: FileOpenFlags,
+    #[cfg(test)]
+    fail_next_store_io: std::cell::Cell<bool>,
 }
 
 struct ChunkRead {
@@ -104,7 +106,26 @@ impl SlateFileHandle {
             deleted_chunks: BTreeSet::new(),
             metadata_dirty: false,
             flags,
+            #[cfg(test)]
+            fail_next_store_io: std::cell::Cell::new(false),
         })
+    }
+
+    fn check_injected_store_fault(&self) -> Result<()> {
+        #[cfg(test)]
+        {
+            if self.fail_next_store_io.replace(false) {
+                return Err(Error::from(slatedb::Error::unavailable(
+                    "injected store fault".to_string(),
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn inject_store_fault(&self) {
+        self.fail_next_store_io.set(true);
     }
 
     fn chunk_size_u64(&self) -> u64 {
@@ -125,6 +146,8 @@ impl SlateFileHandle {
     }
 
     fn read_chunk_from_store(&self, chunk_idx: u64) -> Result<Vec<u8>> {
+        self.check_injected_store_fault()?;
+
         if self.deleted_chunks.contains(&chunk_idx) {
             return Ok(Vec::new());
         }
@@ -157,6 +180,8 @@ impl SlateFileHandle {
     }
 
     fn collect_persisted_chunk_indices(&self, min_chunk_idx: u64) -> Result<Vec<u64>> {
+        self.check_injected_store_fault()?;
+
         let prefix = keys::chunk_prefix(self.file_id);
 
         self.runtime.block_on(async {
@@ -184,9 +209,9 @@ impl SlateFileHandle {
         }
 
         if new_size == 0 {
+            let chunks_to_delete = self.collect_persisted_chunk_indices(0)?;
             self.dirty_chunks.clear();
-            self.deleted_chunks
-                .extend(self.collect_persisted_chunk_indices(0)?);
+            self.deleted_chunks.extend(chunks_to_delete);
             self.size = new_size;
             self.set_metadata_dirty();
             return Ok(());
@@ -197,24 +222,30 @@ impl SlateFileHandle {
         let last_chunk = last_byte / chunk_size;
         let last_len = usize::try_from((last_byte % chunk_size) + 1).unwrap();
 
-        self.dirty_chunks
-            .retain(|chunk_idx, _| *chunk_idx <= last_chunk);
-
-        if let Some(chunk) = self.dirty_chunks.get_mut(&last_chunk) {
-            if chunk.len() > last_len {
-                chunk.truncate(last_len);
-            }
+        let shortened_last_chunk = if self.dirty_chunks.contains_key(&last_chunk) {
+            None
         } else {
             let mut persisted = self.read_chunk_from_store(last_chunk)?;
             if persisted.len() > last_len {
                 persisted.truncate(last_len);
-                self.dirty_chunks.insert(last_chunk, persisted);
+                Some(persisted)
+            } else {
+                None
             }
+        };
+        let chunks_to_delete = self.collect_persisted_chunk_indices(last_chunk + 1)?;
+
+        self.dirty_chunks
+            .retain(|chunk_idx, _| *chunk_idx <= last_chunk);
+        if let Some(chunk) = self.dirty_chunks.get_mut(&last_chunk) {
+            if chunk.len() > last_len {
+                chunk.truncate(last_len);
+            }
+        } else if let Some(shortened) = shortened_last_chunk {
+            self.dirty_chunks.insert(last_chunk, shortened);
         }
 
-        self.deleted_chunks
-            .extend(self.collect_persisted_chunk_indices(last_chunk + 1)?);
-
+        self.deleted_chunks.extend(chunks_to_delete);
         self.size = new_size;
         self.set_metadata_dirty();
         Ok(())
@@ -586,6 +617,27 @@ mod tests {
         assert_eq!(&buf[..5], b"abcde");
         assert_eq!(&buf[5..8], &[0, 0, 0]);
         assert_eq!(buf[8], b'Z');
+    }
+
+    #[test]
+    fn failed_truncate_preserves_unflushed_writes() {
+        let fixture = TestDb::new();
+        let mut handle = fixture.handle(5, FileOpenFlags::create());
+
+        handle.pwrite(b"abcdefghij", 0).unwrap();
+        assert_eq!(handle.file_size(), 10);
+
+        handle.inject_store_fault();
+        assert!(matches!(handle.truncate(5), Err(Error::SlateDb(_))));
+        assert_eq!(handle.file_size(), 10);
+
+        handle.inject_store_fault();
+        assert!(matches!(handle.truncate(0), Err(Error::SlateDb(_))));
+        assert_eq!(handle.file_size(), 10);
+
+        let mut buf = [0u8; 10];
+        assert_eq!(handle.pread(&mut buf, 0).unwrap(), 10);
+        assert_eq!(&buf, b"abcdefghij");
     }
 
     #[test]
