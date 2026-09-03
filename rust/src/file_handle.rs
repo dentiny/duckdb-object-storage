@@ -2,11 +2,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures::future;
 use slatedb::{Db, WriteBatch};
-use tokio::runtime::Runtime;
 
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
@@ -16,21 +18,22 @@ use crate::metadata::FileMetadata;
 use crate::util::current_time_millis;
 
 /// Sequential and positional I/O, matching DuckDB's `FileHandle` methods.
+#[async_trait]
 pub trait FileHandle: Debug {
     /// Read at `offset` without moving the file position.
-    fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize>;
+    async fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize>;
 
     /// Write at `offset` without moving the file position.
-    fn pwrite(&mut self, data: &[u8], offset: u64) -> Result<()>;
+    async fn pwrite(&mut self, data: &[u8], offset: u64) -> Result<()>;
 
     /// Read at the current position and advance it.
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
 
     /// Write at the current position and advance it.
-    fn write(&mut self, data: &[u8]) -> Result<usize>;
+    async fn write(&mut self, data: &[u8]) -> Result<usize>;
 
     /// Persist dirty chunks and metadata.
-    fn sync(&mut self) -> Result<()>;
+    async fn sync(&mut self) -> Result<()>;
 
     /// Set the file position.
     fn seek(&mut self, position: u64);
@@ -45,15 +48,13 @@ pub trait FileHandle: Debug {
     fn file_size(&self) -> u64;
 
     /// Shrink or grow the file to `new_size` bytes.
-    fn truncate(&mut self, new_size: u64) -> Result<()>;
+    async fn truncate(&mut self, new_size: u64) -> Result<()>;
 
     /// Last modification time in epoch milliseconds.
     fn get_last_modified_time(&self) -> u64;
 
-    /// Flush dirty state, then consume the handle.
-    fn close(self) -> Result<()>
-    where
-        Self: Sized;
+    /// Flush dirty state. Calling `close` again is harmless.
+    async fn close(&mut self) -> Result<()>;
 
     fn file_id(&self) -> u64;
     fn flags(&self) -> FileOpenFlags;
@@ -61,7 +62,6 @@ pub trait FileHandle: Debug {
 
 pub struct SlateFileHandle {
     db: Arc<Db>,
-    runtime: Arc<Runtime>,
     file_id: u64,
     position: u64,
     size: u64,
@@ -72,7 +72,7 @@ pub struct SlateFileHandle {
     metadata_dirty: bool,
     flags: FileOpenFlags,
     #[cfg(test)]
-    fail_next_store_io: std::cell::Cell<bool>,
+    fail_next_store_io: AtomicBool,
 }
 
 struct ChunkRead {
@@ -86,7 +86,6 @@ impl SlateFileHandle {
     /// Open a handle over an existing metadata record.
     pub fn new(
         db: Arc<Db>,
-        runtime: Arc<Runtime>,
         file_id: u64,
         metadata: FileMetadata,
         flags: FileOpenFlags,
@@ -96,7 +95,6 @@ impl SlateFileHandle {
 
         Ok(Self {
             db,
-            runtime,
             file_id,
             position: 0,
             size: metadata.size,
@@ -107,14 +105,14 @@ impl SlateFileHandle {
             metadata_dirty: false,
             flags,
             #[cfg(test)]
-            fail_next_store_io: std::cell::Cell::new(false),
+            fail_next_store_io: AtomicBool::new(false),
         })
     }
 
     fn check_injected_store_fault(&self) -> Result<()> {
         #[cfg(test)]
         {
-            if self.fail_next_store_io.replace(false) {
+            if self.fail_next_store_io.swap(false, Ordering::SeqCst) {
                 return Err(Error::from(slatedb::Error::unavailable(
                     "injected store fault".to_string(),
                 )));
@@ -125,7 +123,7 @@ impl SlateFileHandle {
 
     #[cfg(test)]
     fn inject_store_fault(&self) {
-        self.fail_next_store_io.set(true);
+        self.fail_next_store_io.store(true, Ordering::SeqCst);
     }
 
     fn chunk_size_u64(&self) -> u64 {
@@ -145,7 +143,7 @@ impl SlateFileHandle {
         }
     }
 
-    fn read_chunk_from_store(&self, chunk_idx: u64) -> Result<Vec<u8>> {
+    async fn read_chunk_from_store(&self, chunk_idx: u64) -> Result<Vec<u8>> {
         self.check_injected_store_fault()?;
 
         if self.deleted_chunks.contains(&chunk_idx) {
@@ -153,51 +151,47 @@ impl SlateFileHandle {
         }
 
         let key = keys::chunk_key(self.file_id, chunk_idx);
-        let bytes = self.runtime.block_on(async { self.db.get(&key).await })?;
+        let bytes = self.db.get(&key).await?;
         Ok(bytes.map(|bytes| bytes.to_vec()).unwrap_or_default())
     }
 
-    fn read_chunks_from_store_parallel(&self, chunk_indices: &[u64]) -> Result<Vec<Vec<u8>>> {
-        self.runtime.block_on(async {
-            future::try_join_all(chunk_indices.iter().map(|chunk_idx| {
-                let db = Arc::clone(&self.db);
-                let key = keys::chunk_key(self.file_id, *chunk_idx);
-                async move {
-                    let bytes = db.get(&key).await?;
-                    Ok::<Vec<u8>, Error>(bytes.map(|bytes| bytes.to_vec()).unwrap_or_default())
-                }
-            }))
-            .await
-        })
+    async fn read_chunks_from_store_parallel(&self, chunk_indices: &[u64]) -> Result<Vec<Vec<u8>>> {
+        future::try_join_all(chunk_indices.iter().map(|chunk_idx| {
+            let db = Arc::clone(&self.db);
+            let key = keys::chunk_key(self.file_id, *chunk_idx);
+            async move {
+                let bytes = db.get(&key).await?;
+                Ok::<Vec<u8>, Error>(bytes.map(|bytes| bytes.to_vec()).unwrap_or_default())
+            }
+        }))
+        .await
     }
 
-    fn load_chunk_for_write(&self, chunk_idx: u64) -> Result<Vec<u8>> {
+    async fn load_chunk_for_write(&self, chunk_idx: u64) -> Result<Vec<u8>> {
         if let Some(chunk) = self.dirty_chunks.get(&chunk_idx) {
             return Ok(chunk.clone());
         }
 
-        self.read_chunk_from_store(chunk_idx)
+        self.read_chunk_from_store(chunk_idx).await
     }
 
-    fn collect_persisted_chunk_indices(&self, min_chunk_idx: u64) -> Result<Vec<u64>> {
+    async fn collect_persisted_chunk_indices(&self, min_chunk_idx: u64) -> Result<Vec<u64>> {
         self.check_injected_store_fault()?;
 
         let prefix = keys::chunk_prefix(self.file_id);
 
-        self.runtime.block_on(async {
-            let mut iter = self.db.scan_prefix(prefix, ..).await?;
-            let mut chunk_indices = Vec::new();
-            while let Some(kv) = iter.next().await? {
-                let chunk_idx = parse_chunk_idx(kv.key.as_ref())?;
-                if chunk_idx >= min_chunk_idx {
-                    chunk_indices.push(chunk_idx);
-                }
+        let mut iter = self.db.scan_prefix(prefix, ..).await?;
+        let mut chunk_indices = Vec::new();
+        while let Some(kv) = iter.next().await? {
+            let chunk_idx = parse_chunk_idx(kv.key.as_ref())?;
+            if chunk_idx >= min_chunk_idx {
+                chunk_indices.push(chunk_idx);
             }
-            Ok(chunk_indices)
-        })
+        }
+        Ok(chunk_indices)
     }
 
-    fn truncate_internal(&mut self, new_size: u64) -> Result<()> {
+    async fn truncate_internal(&mut self, new_size: u64) -> Result<()> {
         if new_size == self.size {
             return Ok(());
         }
@@ -209,7 +203,7 @@ impl SlateFileHandle {
         }
 
         if new_size == 0 {
-            let chunks_to_delete = self.collect_persisted_chunk_indices(0)?;
+            let chunks_to_delete = self.collect_persisted_chunk_indices(0).await?;
             self.dirty_chunks.clear();
             self.deleted_chunks.extend(chunks_to_delete);
             self.size = new_size;
@@ -225,7 +219,7 @@ impl SlateFileHandle {
         let shortened_last_chunk = if self.dirty_chunks.contains_key(&last_chunk) {
             None
         } else {
-            let mut persisted = self.read_chunk_from_store(last_chunk)?;
+            let mut persisted = self.read_chunk_from_store(last_chunk).await?;
             if persisted.len() > last_len {
                 persisted.truncate(last_len);
                 Some(persisted)
@@ -233,7 +227,7 @@ impl SlateFileHandle {
                 None
             }
         };
-        let chunks_to_delete = self.collect_persisted_chunk_indices(last_chunk + 1)?;
+        let chunks_to_delete = self.collect_persisted_chunk_indices(last_chunk + 1).await?;
 
         self.dirty_chunks
             .retain(|chunk_idx, _| *chunk_idx <= last_chunk);
@@ -265,8 +259,9 @@ impl Debug for SlateFileHandle {
     }
 }
 
+#[async_trait]
 impl FileHandle for SlateFileHandle {
-    fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
+    async fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
         self.flags.ensure_readable(self.file_id)?;
 
         if buf.is_empty() || offset >= self.size {
@@ -309,7 +304,9 @@ impl FileHandle for SlateFileHandle {
             .iter()
             .map(|read| read.chunk_idx)
             .collect::<Vec<_>>();
-        let persisted_chunks = self.read_chunks_from_store_parallel(&persisted_chunk_indices)?;
+        let persisted_chunks = self
+            .read_chunks_from_store_parallel(&persisted_chunk_indices)
+            .await?;
         for (read, chunk) in persisted_reads.iter().zip(persisted_chunks) {
             let available_in_chunk = chunk.len().saturating_sub(read.chunk_offset).min(read.len);
             buf[read.buf_offset..read.buf_offset + available_in_chunk]
@@ -319,7 +316,7 @@ impl FileHandle for SlateFileHandle {
         Ok(bytes_to_read)
     }
 
-    fn pwrite(&mut self, data: &[u8], offset: u64) -> Result<()> {
+    async fn pwrite(&mut self, data: &[u8], offset: u64) -> Result<()> {
         self.flags.ensure_writable(self.file_id)?;
 
         if data.is_empty() {
@@ -347,7 +344,7 @@ impl FileHandle for SlateFileHandle {
             let mut chunk = if chunk_offset == 0 && to_copy == self.chunk_size {
                 vec![0; self.chunk_size]
             } else {
-                self.load_chunk_for_write(chunk_idx)?
+                self.load_chunk_for_write(chunk_idx).await?
             };
 
             if chunk.len() < required_len {
@@ -367,7 +364,7 @@ impl FileHandle for SlateFileHandle {
         Ok(())
     }
 
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let available = usize::try_from(self.size.saturating_sub(self.position))
             .unwrap()
             .min(buf.len());
@@ -376,13 +373,13 @@ impl FileHandle for SlateFileHandle {
             return Ok(0);
         }
 
-        let bytes_read = self.pread(&mut buf[..available], self.position)?;
+        let bytes_read = self.pread(&mut buf[..available], self.position).await?;
         self.position += bytes_read as u64;
         Ok(bytes_read)
     }
 
-    fn write(&mut self, data: &[u8]) -> Result<usize> {
-        self.pwrite(data, self.position)?;
+    async fn write(&mut self, data: &[u8]) -> Result<usize> {
+        self.pwrite(data, self.position).await?;
         self.position = self
             .position
             .checked_add(data.len() as u64)
@@ -395,7 +392,7 @@ impl FileHandle for SlateFileHandle {
         Ok(data.len())
     }
 
-    fn sync(&mut self) -> Result<()> {
+    async fn sync(&mut self) -> Result<()> {
         if self.dirty_chunks.is_empty() && self.deleted_chunks.is_empty() && !self.metadata_dirty {
             return Ok(());
         }
@@ -415,11 +412,8 @@ impl FileHandle for SlateFileHandle {
             self.metadata().encode_to_bytes(),
         );
 
-        self.runtime.block_on(async {
-            self.db.write(batch).await?;
-            self.db.flush().await?;
-            Ok::<(), Error>(())
-        })?;
+        self.db.write(batch).await?;
+        self.db.flush().await?;
 
         self.dirty_chunks.clear();
         self.deleted_chunks.clear();
@@ -443,17 +437,17 @@ impl FileHandle for SlateFileHandle {
         self.size
     }
 
-    fn truncate(&mut self, new_size: u64) -> Result<()> {
+    async fn truncate(&mut self, new_size: u64) -> Result<()> {
         self.flags.ensure_writable(self.file_id)?;
-        self.truncate_internal(new_size)
+        self.truncate_internal(new_size).await
     }
 
     fn get_last_modified_time(&self) -> u64 {
         self.modified_at_ms
     }
 
-    fn close(mut self) -> Result<()> {
-        self.sync()
+    async fn close(&mut self) -> Result<()> {
+        self.sync().await
     }
 
     fn file_id(&self) -> u64 {
@@ -500,7 +494,6 @@ mod tests {
 
     use slatedb::object_store::memory::InMemory;
     use slatedb::Db;
-    use tokio::runtime::Runtime;
 
     use super::*;
     use crate::metadata::FileMetadata;
@@ -508,29 +501,17 @@ mod tests {
     const SMALL_CHUNK: u64 = 8;
 
     struct TestDb {
-        runtime: Arc<Runtime>,
         db: Arc<Db>,
     }
 
     impl TestDb {
-        fn new() -> Self {
-            let runtime = Arc::new(
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap(),
-            );
+        async fn new() -> Self {
             let store = Arc::new(InMemory::new());
-            let db = runtime.block_on(async {
-                Db::builder("handle-test", store)
-                    .build()
-                    .await
-                    .expect("open slatedb")
-            });
-            Self {
-                runtime,
-                db: Arc::new(db),
-            }
+            let db = Db::builder("handle-test", store)
+                .build()
+                .await
+                .expect("open slatedb");
+            Self { db: Arc::new(db) }
         }
 
         fn handle(&self, file_id: u64, flags: FileOpenFlags) -> SlateFileHandle {
@@ -539,122 +520,133 @@ mod tests {
                 modified_at_ms: 1,
                 chunk_size: SMALL_CHUNK,
             };
-            SlateFileHandle::new(
-                Arc::clone(&self.db),
-                Arc::clone(&self.runtime),
-                file_id,
-                metadata,
-                flags,
-            )
-            .unwrap()
+            SlateFileHandle::new(Arc::clone(&self.db), file_id, metadata, flags).unwrap()
         }
 
-        fn reopen(&self, file_id: u64, flags: FileOpenFlags) -> SlateFileHandle {
-            let metadata = self.runtime.block_on(async {
-                let bytes = self
-                    .db
-                    .get(keys::metadata_key(file_id))
-                    .await
-                    .unwrap()
-                    .expect("metadata");
-                FileMetadata::decode_from_bytes(&bytes).unwrap()
-            });
-            SlateFileHandle::new(
-                Arc::clone(&self.db),
-                Arc::clone(&self.runtime),
-                file_id,
-                metadata,
-                flags,
-            )
-            .unwrap()
+        async fn reopen(&self, file_id: u64, flags: FileOpenFlags) -> SlateFileHandle {
+            let bytes = self
+                .db
+                .get(keys::metadata_key(file_id))
+                .await
+                .unwrap()
+                .expect("metadata");
+            let metadata = FileMetadata::decode_from_bytes(&bytes).unwrap();
+            SlateFileHandle::new(Arc::clone(&self.db), file_id, metadata, flags).unwrap()
+        }
+
+        async fn close(self) {
+            self.db.close().await.expect("close slatedb");
         }
     }
 
-    #[test]
-    fn sequential_io_tracks_position() {
-        let fixture = TestDb::new();
+    #[tokio::test]
+    async fn sequential_io_tracks_position() {
+        let fixture = TestDb::new().await;
         let mut handle = fixture.handle(1, FileOpenFlags::create());
 
-        assert_eq!(handle.write(b"abcdef").unwrap(), 6);
+        assert_eq!(handle.write(b"abcdef").await.unwrap(), 6);
         assert_eq!(handle.seek_position(), 6);
 
         handle.seek(2);
         let mut buf = [0u8; 3];
-        assert_eq!(handle.read(&mut buf).unwrap(), 3);
+        assert_eq!(handle.read(&mut buf).await.unwrap(), 3);
         assert_eq!(&buf, b"cde");
         handle.reset();
         assert_eq!(handle.seek_position(), 0);
+
+        handle.close().await.unwrap();
+        drop(handle);
+        fixture.close().await;
     }
 
-    #[test]
-    fn writes_persist_across_chunks_and_reopen() {
-        let fixture = TestDb::new();
+    #[tokio::test]
+    async fn writes_persist_across_chunks_and_reopen() {
+        let fixture = TestDb::new().await;
         let mut handle = fixture.handle(2, FileOpenFlags::create());
 
-        handle.pwrite(b"hello", 0).unwrap();
-        handle.pwrite(b"xyz", SMALL_CHUNK - 1).unwrap();
+        handle.pwrite(b"hello", 0).await.unwrap();
+        handle.pwrite(b"xyz", SMALL_CHUNK - 1).await.unwrap();
         assert_eq!(handle.file_size(), SMALL_CHUNK + 2);
-        handle.close().unwrap();
+        handle.close().await.unwrap();
+        drop(handle);
 
-        let mut reopened = fixture.reopen(2, FileOpenFlags::read_only());
+        let mut reopened = fixture.reopen(2, FileOpenFlags::read_only()).await;
         let mut boundary = [0u8; 3];
-        reopened.pread(&mut boundary, SMALL_CHUNK - 1).unwrap();
+        reopened
+            .pread(&mut boundary, SMALL_CHUNK - 1)
+            .await
+            .unwrap();
         assert_eq!(&boundary, b"xyz");
+
+        drop(reopened);
+        fixture.close().await;
     }
 
-    #[test]
-    fn truncate_then_sparse_write_reads_as_zero() {
-        let fixture = TestDb::new();
+    #[tokio::test]
+    async fn truncate_then_sparse_write_reads_as_zero() {
+        let fixture = TestDb::new().await;
         let mut handle = fixture.handle(3, FileOpenFlags::create());
 
-        handle.pwrite(b"abcdefghij", 0).unwrap();
-        handle.sync().unwrap();
-        handle.truncate(5).unwrap();
-        handle.pwrite(b"Z", 8).unwrap();
+        handle.pwrite(b"abcdefghij", 0).await.unwrap();
+        handle.sync().await.unwrap();
+        handle.truncate(5).await.unwrap();
+        handle.pwrite(b"Z", 8).await.unwrap();
 
         let mut buf = [0u8; 9];
-        handle.pread(&mut buf, 0).unwrap();
+        handle.pread(&mut buf, 0).await.unwrap();
         assert_eq!(&buf[..5], b"abcde");
         assert_eq!(&buf[5..8], &[0, 0, 0]);
         assert_eq!(buf[8], b'Z');
+
+        handle.close().await.unwrap();
+        drop(handle);
+        fixture.close().await;
     }
 
-    #[test]
-    fn failed_truncate_preserves_unflushed_writes() {
-        let fixture = TestDb::new();
+    #[tokio::test]
+    async fn failed_truncate_preserves_unflushed_writes() {
+        let fixture = TestDb::new().await;
         let mut handle = fixture.handle(5, FileOpenFlags::create());
 
-        handle.pwrite(b"abcdefghij", 0).unwrap();
+        handle.pwrite(b"abcdefghij", 0).await.unwrap();
         assert_eq!(handle.file_size(), 10);
 
         handle.inject_store_fault();
-        assert!(matches!(handle.truncate(5), Err(Error::SlateDb(_))));
+        assert!(matches!(handle.truncate(5).await, Err(Error::SlateDb(_))));
         assert_eq!(handle.file_size(), 10);
 
         handle.inject_store_fault();
-        assert!(matches!(handle.truncate(0), Err(Error::SlateDb(_))));
+        assert!(matches!(handle.truncate(0).await, Err(Error::SlateDb(_))));
         assert_eq!(handle.file_size(), 10);
 
         let mut buf = [0u8; 10];
-        assert_eq!(handle.pread(&mut buf, 0).unwrap(), 10);
+        assert_eq!(handle.pread(&mut buf, 0).await.unwrap(), 10);
         assert_eq!(&buf, b"abcdefghij");
+
+        handle.close().await.unwrap();
+        drop(handle);
+        fixture.close().await;
     }
 
-    #[test]
-    fn read_only_handle_rejects_writes() {
-        let fixture = TestDb::new();
+    #[tokio::test]
+    async fn read_only_handle_rejects_writes() {
+        let fixture = TestDb::new().await;
         let mut writer = fixture.handle(4, FileOpenFlags::create());
-        writer.pwrite(b"abc", 0).unwrap();
-        writer.close().unwrap();
+        writer.pwrite(b"abc", 0).await.unwrap();
+        writer.close().await.unwrap();
+        drop(writer);
 
-        let mut read_only = fixture.reopen(4, FileOpenFlags::read_only());
+        let mut read_only = fixture.reopen(4, FileOpenFlags::read_only()).await;
         assert!(matches!(
-            read_only.pwrite(b"z", 0),
+            read_only.pwrite(b"z", 0).await,
             Err(Error::InvalidArgument(_))
         ));
         assert!(matches!(
-            read_only.truncate(0),
+            read_only.truncate(0).await,
             Err(Error::InvalidArgument(_))
         ));
+
+        drop(read_only);
+        fixture.close().await;
     }
 }

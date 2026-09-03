@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 publish = false
-description = "SlateDB-backed DuckDB filesystem (dummy implementation)"
+description = "SlateDB-backed DuckDB filesystem"
 
 [lib]
 name = "slatedb_fs"
@@ -16,10 +16,14 @@ protoc-bin-vendored = "3.2"
 
 [dependencies]
 # https://slatedb.io/ — embedded LSM on object storage.
-# default-features (aws, foyer) are left off for a lighter compile while the VFS is dummy.
+# Cloud backends and the optional cache are disabled until the VFS needs them.
 anyhow = "1"
+async-trait = "0.1"
 futures = "0.3"
 prost = "0.14"
 slatedb = { version = "0.15", default-features = false }
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
+
+[dev-dependencies]
+tempfile = "3"
