@@ -18,6 +18,7 @@ protoc-bin-vendored = "3.2"
 # https://slatedb.io/ — embedded LSM on object storage.
 # Cloud backends and the optional cache are disabled until the VFS needs them.
 anyhow = "1"
+async-trait = "0.1"
 futures = "0.3"
 prost = "0.14"
 slatedb = { version = "0.15", default-features = false }
@@ -25,4 +26,4 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
-tempfile = "3.27.0"
+tempfile = "3"

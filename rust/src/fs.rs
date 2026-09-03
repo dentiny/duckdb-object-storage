@@ -4,7 +4,6 @@ use slatedb::object_store::local::LocalFileSystem;
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::Db;
-use tokio::runtime::Runtime;
 
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
@@ -23,17 +22,15 @@ pub const DUMMY_ERROR: &str =
 
 /// SlateDB-backed filesystem owner.
 ///
-/// One runtime and one live database are kept for the lifetime of the
-/// filesystem. File and path operations will share these objects once the VFS
-/// adapter is wired.
+/// One live database is kept for the lifetime of the filesystem. The FFI layer
+/// owns the runtime used to drive these asynchronous operations.
 pub struct SlateDbFileSystem {
-    runtime: Arc<Runtime>,
     db: Option<Arc<Db>>,
 }
 
 impl SlateDbFileSystem {
     /// Open a SlateDB database over the supplied object store.
-    pub fn open(database_path: &str, object_store: Arc<dyn ObjectStore>) -> Result<Self> {
+    pub async fn open(database_path: &str, object_store: Arc<dyn ObjectStore>) -> Result<Self> {
         if database_path.is_empty() {
             return Err(Error::InvalidArgument(ErrorStruct::new(
                 "database path must not be empty".to_string(),
@@ -41,28 +38,23 @@ impl SlateDbFileSystem {
             )));
         }
 
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .build()?,
-        );
-        let db = runtime.block_on(Db::open(database_path, object_store))?;
-
+        let db = Db::open(database_path, object_store).await?;
         Ok(Self {
-            runtime,
             db: Some(Arc::new(db)),
         })
     }
 
     /// Open an isolated in-memory database.
-    pub fn open_in_memory(database_path: &str) -> Result<Self> {
+    pub async fn open_in_memory(database_path: &str) -> Result<Self> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        Self::open(database_path, object_store)
+        Self::open(database_path, object_store).await
     }
 
     /// Open a persistent database rooted at a local directory.
-    pub fn open_local(database_path: &str, root: impl AsRef<std::path::Path>) -> Result<Self> {
+    pub async fn open_local(
+        database_path: &str,
+        root: impl AsRef<std::path::Path>,
+    ) -> Result<Self> {
         std::fs::create_dir_all(root.as_ref())?;
         let object_store = LocalFileSystem::new_with_prefix(root.as_ref())
             .map_err(|source| {
@@ -78,12 +70,12 @@ impl SlateDbFileSystem {
                 )
             })?
             .with_fsync(true);
-        Self::open(database_path, Arc::new(object_store))
+        Self::open(database_path, Arc::new(object_store)).await
     }
 
     /// Open the default in-memory database used by the current C ABI.
-    pub fn try_new() -> Result<Self> {
-        Self::open_in_memory(DEFAULT_DATABASE_PATH)
+    pub async fn try_new() -> Result<Self> {
+        Self::open_in_memory(DEFAULT_DATABASE_PATH).await
     }
 
     /// Flush and close the owned database.
@@ -91,7 +83,7 @@ impl SlateDbFileSystem {
     /// Calling `close` more than once is harmless. Closing while another owner
     /// still holds the database is rejected so live file handles cannot be
     /// invalidated.
-    pub fn close(&mut self) -> Result<()> {
+    pub async fn close(&mut self) -> Result<()> {
         let Some(db) = self.db.as_ref() else {
             return Ok(());
         };
@@ -104,7 +96,7 @@ impl SlateDbFileSystem {
         }
 
         let db = self.db.take().expect("database checked above");
-        self.runtime.block_on(db.close())?;
+        db.close().await?;
         Ok(())
     }
 
@@ -121,93 +113,85 @@ impl SlateDbFileSystem {
     }
 }
 
-impl Drop for SlateDbFileSystem {
-    fn drop(&mut self) {
-        let _ = self.close();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
 
     use super::*;
 
-    fn put(fs: &SlateDbFileSystem, key: &[u8], value: &[u8]) {
+    async fn put(fs: &SlateDbFileSystem, key: &[u8], value: &[u8]) {
         let db = fs.db.as_ref().expect("open database");
-        fs.runtime
-            .block_on(async { db.put(key, value).await })
-            .expect("write");
+        db.put(key, value).await.expect("write");
     }
 
-    fn get(fs: &SlateDbFileSystem, key: &[u8]) -> Option<Vec<u8>> {
+    async fn get(fs: &SlateDbFileSystem, key: &[u8]) -> Option<Vec<u8>> {
         let db = fs.db.as_ref().expect("open database");
-        fs.runtime
-            .block_on(async { db.get(key).await })
-            .expect("read")
-            .map(|value| value.to_vec())
+        db.get(key).await.expect("read").map(|value| value.to_vec())
     }
 
-    #[test]
-    fn opens_live_in_memory_database() {
-        let mut fs = SlateDbFileSystem::try_new().expect("filesystem");
+    #[tokio::test]
+    async fn opens_live_in_memory_database() {
+        let mut fs = SlateDbFileSystem::try_new().await.expect("filesystem");
 
-        put(&fs, b"key", b"value");
-        assert_eq!(get(&fs, b"key"), Some(b"value".to_vec()));
+        put(&fs, b"key", b"value").await;
+        assert_eq!(get(&fs, b"key").await, Some(b"value".to_vec()));
 
-        fs.close().expect("close");
+        fs.close().await.expect("close");
     }
 
-    #[test]
-    fn local_database_persists_across_reopen() {
+    #[tokio::test]
+    async fn local_database_persists_across_reopen() {
         let root = tempdir().expect("temporary object-store root");
 
-        let mut first =
-            SlateDbFileSystem::open_local("persistent-db", root.path()).expect("first open");
-        put(&first, b"key", b"value");
-        first.close().expect("first close");
+        let mut first = SlateDbFileSystem::open_local("persistent-db", root.path())
+            .await
+            .expect("first open");
+        put(&first, b"key", b"value").await;
+        first.close().await.expect("first close");
 
-        let mut second =
-            SlateDbFileSystem::open_local("persistent-db", root.path()).expect("second open");
-        assert_eq!(get(&second, b"key"), Some(b"value".to_vec()));
-        second.close().expect("second close");
+        let mut second = SlateDbFileSystem::open_local("persistent-db", root.path())
+            .await
+            .expect("second open");
+        assert_eq!(get(&second, b"key").await, Some(b"value".to_vec()));
+        second.close().await.expect("second close");
     }
 
-    #[test]
-    fn close_is_idempotent() {
-        let mut fs = SlateDbFileSystem::try_new().expect("filesystem");
+    #[tokio::test]
+    async fn close_is_idempotent() {
+        let mut fs = SlateDbFileSystem::try_new().await.expect("filesystem");
 
-        fs.close().expect("first close");
-        fs.close().expect("second close");
+        fs.close().await.expect("first close");
+        fs.close().await.expect("second close");
     }
 
-    #[test]
-    fn close_rejects_outstanding_database_owner() {
-        let mut fs = SlateDbFileSystem::try_new().expect("filesystem");
+    #[tokio::test]
+    async fn close_rejects_outstanding_database_owner() {
+        let mut fs = SlateDbFileSystem::try_new().await.expect("filesystem");
         let outstanding = Arc::clone(fs.db.as_ref().expect("open database"));
 
-        assert!(matches!(fs.close(), Err(Error::InvalidArgument(_))));
-        put(&fs, b"key", b"value");
+        assert!(matches!(fs.close().await, Err(Error::InvalidArgument(_))));
+        put(&fs, b"key", b"value").await;
 
         drop(outstanding);
-        fs.close().expect("close after releasing owner");
+        fs.close().await.expect("close after releasing owner");
     }
 
-    #[test]
-    fn rejects_empty_database_path() {
-        let error = match SlateDbFileSystem::open_in_memory("") {
+    #[tokio::test]
+    async fn rejects_empty_database_path() {
+        let error = match SlateDbFileSystem::open_in_memory("").await {
             Ok(_) => panic!("empty path should fail"),
             Err(error) => error,
         };
         assert!(matches!(error, Error::InvalidArgument(_)));
     }
 
-    #[test]
-    fn claims_slatedb_urls() {
-        let fs = SlateDbFileSystem::try_new().expect("filesystem");
+    #[tokio::test]
+    async fn claims_slatedb_urls() {
+        let mut fs = SlateDbFileSystem::try_new().await.expect("filesystem");
         assert!(fs.can_handle("slatedb://bucket/key"));
         assert!(!fs.can_handle("s3://bucket/key"));
         assert!(!fs.can_handle("/tmp/foo"));
         assert_eq!(fs.name(), NAME);
+        fs.close().await.expect("close");
     }
 }
