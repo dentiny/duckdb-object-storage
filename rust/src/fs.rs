@@ -4,10 +4,14 @@ use slatedb::object_store::local::LocalFileSystem;
 #[cfg(test)]
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
-use slatedb::Db;
+use slatedb::{Db, IsolationLevel};
 
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
+use crate::file_handle::SlateFileHandle;
+use crate::flags::FileOpenFlags;
+use crate::keys::{metadata_key, next_file_id_key, path_key};
+use crate::metadata::FileMetadata;
 
 /// URL scheme claimed by this filesystem in DuckDB's virtual filesystem.
 pub const PREFIX: &str = "slatedb://";
@@ -81,6 +85,72 @@ impl SlateDbFileSystem {
         Self::open(database_path, Arc::new(object_store)).await
     }
 
+    /// Open a logical file, creating its persistent catalog entry when allowed.
+    ///
+    // TODO: Evaluate adding a read-through in-memory path catalog; SlateDB must remain the source of truth.
+    pub async fn open_file(&self, path: &str, flags: FileOpenFlags) -> Result<SlateFileHandle> {
+        if path.is_empty() {
+            return Err(Error::InvalidArgument(ErrorStruct::new(
+                "file path must not be empty".to_string(),
+                ErrorStatus::Permanent,
+            )));
+        }
+        flags.validate()?;
+
+        let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
+            Error::InvalidArgument(ErrorStruct::new(
+                "filesystem is closed".to_string(),
+                ErrorStatus::Permanent,
+            ))
+        })?);
+        let path_key = path_key(path);
+        let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
+
+        if let Some(file_id_bytes) = transaction.get(&path_key).await? {
+            let file_id = decode_file_id(&file_id_bytes, "path mapping")?;
+            let metadata = transaction
+                .get(metadata_key(file_id))
+                .await?
+                .ok_or_else(|| {
+                    Error::MetadataDecode(ErrorStruct::new(
+                        format!("metadata is missing for file_id {file_id}"),
+                        ErrorStatus::Permanent,
+                    ))
+                })
+                .and_then(|bytes| FileMetadata::decode_from_bytes(&bytes))?;
+            drop(transaction);
+
+            return SlateFileHandle::new(db, file_id, metadata, flags);
+        }
+
+        if !flags.create {
+            return Err(Error::FileNotFound(ErrorStruct::new(
+                format!("file not found: {path}"),
+                ErrorStatus::Permanent,
+            )));
+        }
+
+        let next_file_id_key = next_file_id_key();
+        let file_id = match transaction.get(&next_file_id_key).await? {
+            Some(bytes) => decode_file_id(&bytes, "next file ID")?,
+            None => 1,
+        };
+        let next_file_id = file_id.checked_add(1).ok_or_else(|| {
+            Error::MetadataDecode(ErrorStruct::new(
+                "file ID space is exhausted".to_string(),
+                ErrorStatus::Permanent,
+            ))
+        })?;
+        let metadata = FileMetadata::new();
+
+        transaction.put(&path_key, file_id.to_be_bytes())?;
+        transaction.put(metadata_key(file_id), metadata.encode_to_bytes())?;
+        transaction.put(next_file_id_key, next_file_id.to_be_bytes())?;
+        transaction.commit().await?;
+
+        SlateFileHandle::new(db, file_id, metadata, flags)
+    }
+
     /// Flush and close the owned database.
     ///
     /// Calling `close` more than once is harmless. SlateDB marks all clones of
@@ -107,30 +177,61 @@ impl SlateDbFileSystem {
     }
 }
 
+fn decode_file_id(bytes: &[u8], record: &str) -> Result<u64> {
+    let encoded: [u8; 8] = bytes.try_into().map_err(|_| {
+        Error::MetadataDecode(ErrorStruct::new(
+            format!("{record} must contain an 8-byte file ID"),
+            ErrorStatus::Permanent,
+        ))
+    })?;
+    let file_id = u64::from_be_bytes(encoded);
+    if file_id == 0 {
+        return Err(Error::MetadataDecode(ErrorStruct::new(
+            format!("{record} contains reserved file ID 0"),
+            ErrorStatus::Permanent,
+        )));
+    }
+    Ok(file_id)
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
 
     use super::*;
-
-    async fn put(fs: &SlateDbFileSystem, key: &[u8], value: &[u8]) {
-        let db = fs.db.as_ref().expect("open database");
-        db.put(key, value).await.expect("write");
-    }
-
-    async fn get(fs: &SlateDbFileSystem, key: &[u8]) -> Option<Vec<u8>> {
-        let db = fs.db.as_ref().expect("open database");
-        db.get(key).await.expect("read").map(|value| value.to_vec())
-    }
+    use crate::file_handle::FileHandle;
 
     #[tokio::test]
-    async fn opens_live_in_memory_database() {
+    async fn creates_and_reopens_file_by_path() {
         let mut fs = SlateDbFileSystem::open_in_memory("test-db")
             .await
             .expect("filesystem");
 
-        put(&fs, b"key", b"value").await;
-        assert_eq!(get(&fs, b"key").await, Some(b"value".to_vec()));
+        let mut created = fs
+            .open_file("database.db", FileOpenFlags::create())
+            .await
+            .expect("create file");
+        assert_eq!(created.file_id(), 1);
+        created
+            .write(b"database contents")
+            .await
+            .expect("write file");
+        created.close().await.expect("close created file");
+        drop(created);
+
+        let mut reopened = fs
+            .open_file("database.db", FileOpenFlags::read_only())
+            .await
+            .expect("reopen file");
+        assert_eq!(reopened.file_id(), 1);
+        let mut contents = vec![0; "database contents".len()];
+        assert_eq!(
+            reopened.read(&mut contents).await.expect("read file"),
+            contents.len()
+        );
+        assert_eq!(contents, b"database contents");
+        reopened.close().await.expect("close reopened file");
+        drop(reopened);
 
         fs.close().await.expect("close");
     }
@@ -142,14 +243,46 @@ mod tests {
         let mut first = SlateDbFileSystem::open_local("persistent-db", root.path())
             .await
             .expect("first open");
-        put(&first, b"key", b"value").await;
+        let mut created = first
+            .open_file("database.db", FileOpenFlags::create())
+            .await
+            .expect("create file");
+        created.write(b"persisted").await.expect("write file");
+        created.close().await.expect("close file");
+        drop(created);
         first.close().await.expect("first close");
 
         let mut second = SlateDbFileSystem::open_local("persistent-db", root.path())
             .await
             .expect("second open");
-        assert_eq!(get(&second, b"key").await, Some(b"value".to_vec()));
+        let mut reopened = second
+            .open_file("database.db", FileOpenFlags::read_only())
+            .await
+            .expect("reopen file");
+        let mut contents = vec![0; "persisted".len()];
+        assert_eq!(
+            reopened.read(&mut contents).await.expect("read file"),
+            contents.len()
+        );
+        assert_eq!(contents, b"persisted");
+        reopened.close().await.expect("close file");
+        drop(reopened);
         second.close().await.expect("second close");
+    }
+
+    #[tokio::test]
+    async fn opening_missing_file_without_create_fails() {
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
+
+        let error = fs
+            .open_file("missing.db", FileOpenFlags::read_only())
+            .await
+            .expect_err("missing file should fail");
+        assert!(matches!(error, Error::FileNotFound(_)));
+
+        fs.close().await.expect("close");
     }
 
     #[tokio::test]

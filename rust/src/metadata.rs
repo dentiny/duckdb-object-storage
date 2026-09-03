@@ -7,13 +7,11 @@ use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::util::current_time_millis;
 
 /// Matches DuckDB's `DEFAULT_BLOCK_ALLOC_SIZE` of 262144.
-#[allow(dead_code)]
 pub(crate) const DEFAULT_CHUNK_SIZE: u64 = 256 * 1024;
 
 include!(concat!(env!("OUT_DIR"), "/slatefs.rs"));
 
 impl FileMetadata {
-    #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self {
             size: 0,
@@ -26,7 +24,6 @@ impl FileMetadata {
         self.encode_to_vec()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn decode_from_bytes(bytes: &[u8]) -> Result<Self> {
         Ok(Self::decode(bytes)?)
     }

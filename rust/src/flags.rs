@@ -43,7 +43,7 @@ impl FileOpenFlags {
     }
 
     /// Rejects invalid flag combinations.
-    pub fn validate(&self, file_id: u64) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         let reason = if !self.read && !self.write {
             "at least one of read or write must be set"
         } else if self.create && !self.write {
@@ -53,7 +53,7 @@ impl FileOpenFlags {
         };
 
         Err(Error::InvalidArgument(ErrorStruct::new(
-            format!("invalid flags for file_id {file_id}: {reason}"),
+            format!("invalid file open flags: {reason}"),
             ErrorStatus::Permanent,
         )))
     }

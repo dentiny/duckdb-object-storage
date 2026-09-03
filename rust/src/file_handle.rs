@@ -90,7 +90,7 @@ impl SlateFileHandle {
         metadata: FileMetadata,
         flags: FileOpenFlags,
     ) -> Result<Self> {
-        flags.validate(file_id)?;
+        flags.validate()?;
         let chunk_size = metadata.validated_chunk_size(file_id)?;
 
         Ok(Self {
