@@ -2,9 +2,13 @@ use std::ffi::{c_char, CStr};
 use std::ptr;
 use std::sync::Arc;
 
+use slatedb::object_store::memory::InMemory;
+use slatedb::object_store::ObjectStore;
 use tokio::runtime::Runtime;
 
 use crate::fs::SlateDbFileSystem;
+
+const DATABASE_PATH: &str = "duckdb-object-storage";
 
 /// Synchronous FFI context owning the one async runtime used by this
 /// filesystem instance.
@@ -16,6 +20,7 @@ pub struct FfiFileSystem {
 #[no_mangle]
 pub extern "C" fn slatedb_fs_create() -> *mut FfiFileSystem {
     let runtime = match tokio::runtime::Builder::new_multi_thread()
+        // TODO(hjiang): Tune the worker count.
         .worker_threads(1)
         .enable_all()
         .build()
@@ -23,7 +28,8 @@ pub extern "C" fn slatedb_fs_create() -> *mut FfiFileSystem {
         Ok(runtime) => Arc::new(runtime),
         Err(_) => return ptr::null_mut(),
     };
-    let fs = match runtime.block_on(SlateDbFileSystem::try_new()) {
+    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let fs = match runtime.block_on(SlateDbFileSystem::open(DATABASE_PATH, object_store)) {
         Ok(fs) => fs,
         Err(_) => return ptr::null_mut(),
     };

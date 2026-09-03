@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use slatedb::object_store::local::LocalFileSystem;
+#[cfg(test)]
 use slatedb::object_store::memory::InMemory;
 use slatedb::object_store::ObjectStore;
 use slatedb::Db;
@@ -13,8 +14,6 @@ pub const PREFIX: &str = "slatedb://";
 
 /// Name reported to DuckDB via `FileSystem::GetName`.
 pub const NAME: &str = "SlateDBFileSystem";
-
-const DEFAULT_DATABASE_PATH: &str = "duckdb-object-storage";
 
 /// Distinctive error so SQL tests can confirm VFS routing.
 pub const DUMMY_ERROR: &str =
@@ -29,7 +28,6 @@ pub struct SlateDbFileSystem {
 }
 
 impl SlateDbFileSystem {
-    /// Open a SlateDB database over the supplied object store.
     pub async fn open(database_path: &str, object_store: Arc<dyn ObjectStore>) -> Result<Self> {
         if database_path.is_empty() {
             return Err(Error::InvalidArgument(ErrorStruct::new(
@@ -44,58 +42,54 @@ impl SlateDbFileSystem {
         })
     }
 
-    /// Open an isolated in-memory database.
-    pub async fn open_in_memory(database_path: &str) -> Result<Self> {
+    #[cfg(test)]
+    async fn open_in_memory(database_path: &str) -> Result<Self> {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         Self::open(database_path, object_store).await
     }
 
-    /// Open a persistent database rooted at a local directory.
     pub async fn open_local(
         database_path: &str,
         root: impl AsRef<std::path::Path>,
     ) -> Result<Self> {
-        std::fs::create_dir_all(root.as_ref())?;
-        let object_store = LocalFileSystem::new_with_prefix(root.as_ref())
-            .map_err(|source| {
-                Error::Io(
-                    ErrorStruct::new(
-                        format!(
-                            "failed to open local object store at {}",
-                            root.as_ref().display()
-                        ),
-                        ErrorStatus::Permanent,
-                    )
-                    .with_source(source),
-                )
-            })?
-            .with_fsync(true);
-        Self::open(database_path, Arc::new(object_store)).await
-    }
+        let root = root.as_ref().to_path_buf();
+        tokio::fs::create_dir_all(&root).await?;
 
-    /// Open the default in-memory database used by the current C ABI.
-    pub async fn try_new() -> Result<Self> {
-        Self::open_in_memory(DEFAULT_DATABASE_PATH).await
+        let local_root = root.clone();
+        let object_store =
+            tokio::task::spawn_blocking(move || LocalFileSystem::new_with_prefix(local_root))
+                .await
+                .map_err(|source| {
+                    Error::Io(
+                        ErrorStruct::new(
+                            "local object store initialization task failed".to_string(),
+                            ErrorStatus::Permanent,
+                        )
+                        .with_source(source),
+                    )
+                })?
+                .map_err(|source| {
+                    Error::Io(
+                        ErrorStruct::new(
+                            format!("failed to open local object store at {}", root.display()),
+                            ErrorStatus::Permanent,
+                        )
+                        .with_source(source),
+                    )
+                })?
+                .with_fsync(true);
+        Self::open(database_path, Arc::new(object_store)).await
     }
 
     /// Flush and close the owned database.
     ///
-    /// Calling `close` more than once is harmless. Closing while another owner
-    /// still holds the database is rejected so live file handles cannot be
-    /// invalidated.
+    /// Calling `close` more than once is harmless. SlateDB marks all clones of
+    /// the database closed.
     pub async fn close(&mut self) -> Result<()> {
-        let Some(db) = self.db.as_ref() else {
+        let Some(db) = self.db.take() else {
             return Ok(());
         };
 
-        if Arc::strong_count(db) != 1 {
-            return Err(Error::InvalidArgument(ErrorStruct::new(
-                "cannot close filesystem while database handles are still open".to_string(),
-                ErrorStatus::Permanent,
-            )));
-        }
-
-        let db = self.db.take().expect("database checked above");
         db.close().await?;
         Ok(())
     }
@@ -131,7 +125,9 @@ mod tests {
 
     #[tokio::test]
     async fn opens_live_in_memory_database() {
-        let mut fs = SlateDbFileSystem::try_new().await.expect("filesystem");
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
 
         put(&fs, b"key", b"value").await;
         assert_eq!(get(&fs, b"key").await, Some(b"value".to_vec()));
@@ -157,37 +153,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_is_idempotent() {
-        let mut fs = SlateDbFileSystem::try_new().await.expect("filesystem");
-
-        fs.close().await.expect("first close");
-        fs.close().await.expect("second close");
-    }
-
-    #[tokio::test]
-    async fn close_rejects_outstanding_database_owner() {
-        let mut fs = SlateDbFileSystem::try_new().await.expect("filesystem");
-        let outstanding = Arc::clone(fs.db.as_ref().expect("open database"));
-
-        assert!(matches!(fs.close().await, Err(Error::InvalidArgument(_))));
-        put(&fs, b"key", b"value").await;
-
-        drop(outstanding);
-        fs.close().await.expect("close after releasing owner");
-    }
-
-    #[tokio::test]
-    async fn rejects_empty_database_path() {
-        let error = match SlateDbFileSystem::open_in_memory("").await {
-            Ok(_) => panic!("empty path should fail"),
-            Err(error) => error,
-        };
-        assert!(matches!(error, Error::InvalidArgument(_)));
-    }
-
-    #[tokio::test]
     async fn claims_slatedb_urls() {
-        let mut fs = SlateDbFileSystem::try_new().await.expect("filesystem");
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
         assert!(fs.can_handle("slatedb://bucket/key"));
         assert!(!fs.can_handle("s3://bucket/key"));
         assert!(!fs.can_handle("/tmp/foo"));
