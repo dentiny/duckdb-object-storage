@@ -492,7 +492,9 @@ fn parse_chunk_idx(key: &[u8]) -> Result<u64> {
 mod tests {
     use std::sync::Arc;
 
-    use slatedb::object_store::memory::InMemory;
+    use object_store_opendal::OpendalStore;
+    use opendal::services::Memory;
+    use opendal::Operator;
     use slatedb::Db;
 
     use super::*;
@@ -506,7 +508,9 @@ mod tests {
 
     impl TestDb {
         async fn new() -> Self {
-            let store = Arc::new(InMemory::new());
+            let operator =
+                Operator::new(Memory::default()).expect("create OpenDAL memory operator");
+            let store = Arc::new(OpendalStore::new(operator));
             let db = Db::builder("handle-test", store)
                 .build()
                 .await
