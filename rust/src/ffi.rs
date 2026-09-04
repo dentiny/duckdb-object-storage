@@ -2,8 +2,6 @@ use std::ffi::{c_char, CStr};
 use std::ptr;
 use std::sync::Arc;
 
-use slatedb::object_store::memory::InMemory;
-use slatedb::object_store::ObjectStore;
 use tokio::runtime::Runtime;
 
 use crate::fs::SlateDbFileSystem;
@@ -28,8 +26,7 @@ pub extern "C" fn slatedb_fs_create() -> *mut FfiFileSystem {
         Ok(runtime) => Arc::new(runtime),
         Err(_) => return ptr::null_mut(),
     };
-    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-    let fs = match runtime.block_on(SlateDbFileSystem::open(DATABASE_PATH, object_store)) {
+    let fs = match runtime.block_on(SlateDbFileSystem::open_in_memory(DATABASE_PATH)) {
         Ok(fs) => fs,
         Err(_) => return ptr::null_mut(),
     };
