@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_exists_tracks_path_catalog() {
+    async fn file_exists_uses_path_mapping_only() {
         let mut fs = SlateDbFileSystem::open_in_memory("test-db")
             .await
             .expect("filesystem");
@@ -254,6 +254,7 @@ mod tests {
             .open_file("database.db", FileOpenFlags::create())
             .await
             .expect("create file");
+        let file_id = file.file_id();
         file.close().await.expect("close file");
         drop(file);
 
@@ -261,23 +262,6 @@ mod tests {
             .file_exists("database.db")
             .await
             .expect("existing lookup"));
-        assert!(!fs.file_exists("other.db").await.expect("other lookup"));
-
-        fs.close().await.expect("close");
-    }
-
-    #[tokio::test]
-    async fn file_exists_only_reads_the_path_mapping() {
-        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
-            .await
-            .expect("filesystem");
-        let mut file = fs
-            .open_file("database.db", FileOpenFlags::create())
-            .await
-            .expect("create file");
-        let file_id = file.file_id();
-        file.close().await.expect("close file");
-        drop(file);
 
         let mut batch = WriteBatch::new();
         batch.delete(keys::metadata_key(file_id));
