@@ -31,6 +31,35 @@ impl DatabaseMetadata {
         Ok(self.db.get(path_key(path)).await?.is_some())
     }
 
+    /// Atomically removes a path mapping, its metadata, and all content chunks.
+    pub(crate) async fn remove_file(&self, path: &str) -> Result<()> {
+        validate_path(path)?;
+
+        let path_key = path_key(path);
+        let transaction = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let file_id = transaction
+            .get(&path_key)
+            .await?
+            .ok_or_else(|| {
+                Error::FileNotFound(ErrorStruct::new(
+                    format!("file not found: {path}"),
+                    ErrorStatus::Permanent,
+                ))
+            })
+            .and_then(|bytes| decode_file_id(&bytes, "path mapping"))?;
+
+        transaction.delete(&path_key)?;
+        transaction.delete(metadata_key(file_id))?;
+
+        let mut chunks = transaction.scan_prefix(chunk_prefix(file_id), ..).await?;
+        while let Some(chunk) = chunks.next().await? {
+            transaction.delete(chunk.key)?;
+        }
+
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Atomically moves a path mapping, replacing the destination when present.
     pub(crate) async fn move_file(&self, source: &str, target: &str) -> Result<()> {
         validate_path(source)?;

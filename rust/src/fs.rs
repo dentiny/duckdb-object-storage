@@ -115,6 +115,17 @@ impl SlateDbFileSystem {
         DatabaseMetadata::new(db).file_exists(path).await
     }
 
+    /// Atomically removes a logical file and all of its persisted state.
+    pub async fn remove_file(&self, path: &str) -> Result<()> {
+        let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
+            Error::InvalidArgument(ErrorStruct::new(
+                "filesystem is closed".to_string(),
+                ErrorStatus::Permanent,
+            ))
+        })?);
+        DatabaseMetadata::new(db).remove_file(path).await
+    }
+
     /// Atomically moves a logical file, replacing the destination if present.
     pub async fn move_file(&self, source: &str, target: &str) -> Result<()> {
         let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
@@ -284,6 +295,45 @@ mod tests {
             .expect("delete metadata");
 
         assert!(fs.file_exists("database.db").await.expect("path lookup"));
+
+        fs.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn remove_file_deletes_catalog_metadata_and_chunks() {
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
+        let mut file = fs
+            .open_file("database.db", FileOpenFlags::create())
+            .await
+            .expect("create file");
+        let file_id = file.file_id();
+        file.write(b"contents").await.expect("write file");
+        file.close().await.expect("close file");
+        drop(file);
+
+        fs.remove_file("database.db").await.expect("remove file");
+
+        assert!(!fs.file_exists("database.db").await.expect("path lookup"));
+        let db = fs.db.as_ref().expect("open database");
+        assert!(db
+            .get(keys::metadata_key(file_id))
+            .await
+            .expect("read metadata")
+            .is_none());
+        assert!(db
+            .scan_prefix(keys::chunk_prefix(file_id), ..)
+            .await
+            .expect("scan chunks")
+            .next()
+            .await
+            .expect("read chunk")
+            .is_none());
+        assert!(matches!(
+            fs.remove_file("database.db").await,
+            Err(Error::FileNotFound(_))
+        ));
 
         fs.close().await.expect("close");
     }
