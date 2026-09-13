@@ -104,6 +104,17 @@ impl SlateDbFileSystem {
         SlateFileHandle::new(db, file_id, metadata, flags)
     }
 
+    /// Returns whether a logical path is present in the database catalog.
+    pub async fn file_exists(&self, path: &str) -> Result<bool> {
+        let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
+            Error::InvalidArgument(ErrorStruct::new(
+                "filesystem is closed".to_string(),
+                ErrorStatus::Permanent,
+            ))
+        })?);
+        DatabaseMetadata::new(db).file_exists(path).await
+    }
+
     /// Flush and close the owned database.
     ///
     /// Calling `close` more than once is harmless. SlateDB marks all clones of
@@ -132,10 +143,12 @@ impl SlateDbFileSystem {
 
 #[cfg(test)]
 mod tests {
+    use slatedb::WriteBatch;
     use tempfile::tempdir;
 
     use super::*;
     use crate::file_handle::FileHandle;
+    use crate::keys;
 
     #[tokio::test]
     async fn creates_and_reopens_file_by_path() {
@@ -225,6 +238,41 @@ mod tests {
             .await
             .expect_err("missing file should fail");
         assert!(matches!(error, Error::FileNotFound(_)));
+
+        fs.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn file_exists_uses_path_mapping_only() {
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
+
+        assert!(!fs.file_exists("database.db").await.expect("missing lookup"));
+
+        let mut file = fs
+            .open_file("database.db", FileOpenFlags::create())
+            .await
+            .expect("create file");
+        let file_id = file.file_id();
+        file.close().await.expect("close file");
+        drop(file);
+
+        assert!(fs
+            .file_exists("database.db")
+            .await
+            .expect("existing lookup"));
+
+        let mut batch = WriteBatch::new();
+        batch.delete(keys::metadata_key(file_id));
+        fs.db
+            .as_ref()
+            .expect("open database")
+            .write(batch)
+            .await
+            .expect("delete metadata");
+
+        assert!(fs.file_exists("database.db").await.expect("path lookup"));
 
         fs.close().await.expect("close");
     }
