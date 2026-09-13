@@ -3,14 +3,13 @@ use std::sync::Arc;
 use object_store_opendal::OpendalStore;
 use opendal::services::{Fs, Memory};
 use opendal::Operator;
-use slatedb::{Db, IsolationLevel};
+use slatedb::Db;
 
+use crate::database_metadata::DatabaseMetadata;
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::SlateFileHandle;
 use crate::flags::FileOpenFlags;
-use crate::keys::{metadata_key, next_file_id_key, path_key};
-use crate::metadata::FileMetadata;
 
 /// URL scheme claimed by this filesystem in DuckDB's virtual filesystem.
 pub const PREFIX: &str = "slatedb://";
@@ -89,12 +88,6 @@ impl SlateDbFileSystem {
     ///
     // TODO: Evaluate adding a read-through in-memory path catalog; SlateDB must remain the source of truth.
     pub async fn open_file(&self, path: &str, flags: FileOpenFlags) -> Result<SlateFileHandle> {
-        if path.is_empty() {
-            return Err(Error::InvalidArgument(ErrorStruct::new(
-                "file path must not be empty".to_string(),
-                ErrorStatus::Permanent,
-            )));
-        }
         flags.validate()?;
 
         let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
@@ -103,50 +96,10 @@ impl SlateDbFileSystem {
                 ErrorStatus::Permanent,
             ))
         })?);
-        let path_key = path_key(path);
-        let transaction = db.begin(IsolationLevel::SerializableSnapshot).await?;
-
-        if let Some(file_id_bytes) = transaction.get(&path_key).await? {
-            let file_id = decode_file_id(&file_id_bytes, "path mapping")?;
-            let metadata = transaction
-                .get(metadata_key(file_id))
-                .await?
-                .ok_or_else(|| {
-                    Error::MetadataDecode(ErrorStruct::new(
-                        format!("metadata is missing for file_id {file_id}"),
-                        ErrorStatus::Permanent,
-                    ))
-                })
-                .and_then(|bytes| FileMetadata::decode_from_bytes(&bytes))?;
-            drop(transaction);
-
-            return SlateFileHandle::new(db, file_id, metadata, flags);
-        }
-
-        if !flags.create {
-            return Err(Error::FileNotFound(ErrorStruct::new(
-                format!("file not found: {path}"),
-                ErrorStatus::Permanent,
-            )));
-        }
-
-        let next_file_id_key = next_file_id_key();
-        let file_id = match transaction.get(&next_file_id_key).await? {
-            Some(bytes) => decode_file_id(&bytes, "next file ID")?,
-            None => 1,
-        };
-        let next_file_id = file_id.checked_add(1).ok_or_else(|| {
-            Error::MetadataDecode(ErrorStruct::new(
-                "file ID space is exhausted".to_string(),
-                ErrorStatus::Permanent,
-            ))
-        })?;
-        let metadata = FileMetadata::new();
-
-        transaction.put(&path_key, file_id.to_be_bytes())?;
-        transaction.put(metadata_key(file_id), metadata.encode_to_bytes())?;
-        transaction.put(next_file_id_key, next_file_id.to_be_bytes())?;
-        transaction.commit().await?;
+        let database_metadata = DatabaseMetadata::new(Arc::clone(&db));
+        let (file_id, metadata) = database_metadata
+            .get_or_create_file(path, flags.create)
+            .await?;
 
         SlateFileHandle::new(db, file_id, metadata, flags)
     }
@@ -175,23 +128,6 @@ impl SlateDbFileSystem {
     pub fn dummy_error(&self) -> &'static str {
         DUMMY_ERROR
     }
-}
-
-fn decode_file_id(bytes: &[u8], record: &str) -> Result<u64> {
-    let encoded: [u8; 8] = bytes.try_into().map_err(|_| {
-        Error::MetadataDecode(ErrorStruct::new(
-            format!("{record} must contain an 8-byte file ID"),
-            ErrorStatus::Permanent,
-        ))
-    })?;
-    let file_id = u64::from_be_bytes(encoded);
-    if file_id == 0 {
-        return Err(Error::MetadataDecode(ErrorStruct::new(
-            format!("{record} contains reserved file ID 0"),
-            ErrorStatus::Permanent,
-        )));
-    }
-    Ok(file_id)
 }
 
 #[cfg(test)]

@@ -9,7 +9,6 @@ use std::fmt;
 enum Prefix {
     Chunk,
     Metadata,
-    Path,
 }
 
 impl Prefix {
@@ -17,7 +16,6 @@ impl Prefix {
         match self {
             Prefix::Chunk => "c/",
             Prefix::Metadata => "m/",
-            Prefix::Path => "p/",
         }
     }
 }
@@ -43,25 +41,6 @@ pub(crate) fn chunk_prefix(file_id: u64) -> Vec<u8> {
 /// Returns `m/<file_id:016x>`.
 pub(crate) fn metadata_key(file_id: u64) -> Vec<u8> {
     format!("{}{file_id:016x}", Prefix::Metadata).into_bytes()
-}
-
-/// Returns the reserved metadata key holding the next available file ID.
-pub(crate) fn next_file_id_key() -> Vec<u8> {
-    format!("{}0000000000000000/next_file_id", Prefix::Metadata).into_bytes()
-}
-
-/// Returns `p/<path>`.
-pub(crate) fn path_key(path: &str) -> Vec<u8> {
-    format!("{}{path}", Prefix::Path).into_bytes()
-}
-
-/// Returns the path encoded in a key produced by [`path_key`], or `None` if
-/// `key` is not valid UTF-8 or belongs to another key family.
-#[allow(dead_code)]
-pub(crate) fn parse_path_from_key(key: &[u8]) -> Option<&str> {
-    std::str::from_utf8(key)
-        .ok()?
-        .strip_prefix(Prefix::Path.as_str())
 }
 
 #[cfg(test)]
@@ -93,35 +72,8 @@ mod tests {
     }
 
     #[test]
-    fn next_file_id_key_sorts_before_every_file_metadata_key() {
-        assert_eq!(next_file_id_key(), b"m/0000000000000000/next_file_id");
-        assert!(next_file_id_key() < metadata_key(1));
-    }
-
-    #[test]
-    fn path_key_round_trips() {
-        let path = "some/file.db";
-
-        let key = path_key(path);
-
-        assert!(key.starts_with(b"p/"));
-        assert_eq!(parse_path_from_key(&key), Some(path));
-    }
-
-    #[test]
-    fn parse_path_rejects_other_key_families() {
-        assert_eq!(parse_path_from_key(&chunk_key(1, 0)), None);
-        assert_eq!(parse_path_from_key(&metadata_key(1)), None);
-    }
-
-    #[test]
-    fn parse_path_rejects_invalid_utf8() {
-        assert_eq!(parse_path_from_key(b"p/\xff\xfe"), None);
-    }
-
-    #[test]
     fn key_families_are_disjoint() {
-        let keys = [chunk_key(0, 0), metadata_key(0), path_key("")];
+        let keys = [chunk_key(0, 0), metadata_key(0)];
 
         // Families are discriminated by their leading byte, so no scan can
         // straddle two of them however large the file ids or paths get.

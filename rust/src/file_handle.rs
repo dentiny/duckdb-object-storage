@@ -12,9 +12,9 @@ use slatedb::{Db, WriteBatch};
 
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
+use crate::file_metadata::FileMetadata;
 use crate::flags::FileOpenFlags;
 use crate::keys;
-use crate::metadata::FileMetadata;
 use crate::util::current_time_millis;
 
 /// Sequential and positional I/O, matching DuckDB's `FileHandle` methods.
@@ -498,7 +498,7 @@ mod tests {
     use slatedb::Db;
 
     use super::*;
-    use crate::metadata::FileMetadata;
+    use crate::file_metadata::FileMetadata;
 
     const SMALL_CHUNK: u64 = 8;
 
