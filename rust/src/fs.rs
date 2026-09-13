@@ -115,6 +115,17 @@ impl SlateDbFileSystem {
         DatabaseMetadata::new(db).file_exists(path).await
     }
 
+    /// Atomically moves a logical file, replacing the destination if present.
+    pub async fn move_file(&self, source: &str, target: &str) -> Result<()> {
+        let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
+            Error::InvalidArgument(ErrorStruct::new(
+                "filesystem is closed".to_string(),
+                ErrorStatus::Permanent,
+            ))
+        })?);
+        DatabaseMetadata::new(db).move_file(source, target).await
+    }
+
     /// Flush and close the owned database.
     ///
     /// Calling `close` more than once is harmless. SlateDB marks all clones of
@@ -273,6 +284,67 @@ mod tests {
             .expect("delete metadata");
 
         assert!(fs.file_exists("database.db").await.expect("path lookup"));
+
+        fs.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn move_file_preserves_source_and_replaces_destination() {
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
+
+        let mut source = fs
+            .open_file("source.db", FileOpenFlags::create())
+            .await
+            .expect("create source");
+        let source_file_id = source.file_id();
+        source.write(b"source").await.expect("write source");
+        source.close().await.expect("close source");
+        drop(source);
+
+        let mut target = fs
+            .open_file("target.db", FileOpenFlags::create())
+            .await
+            .expect("create target");
+        let replaced_file_id = target.file_id();
+        target.write(b"target").await.expect("write target");
+        target.close().await.expect("close target");
+        drop(target);
+
+        fs.move_file("source.db", "target.db")
+            .await
+            .expect("move file");
+
+        assert!(!fs.file_exists("source.db").await.expect("source lookup"));
+        let mut moved = fs
+            .open_file("target.db", FileOpenFlags::read_only())
+            .await
+            .expect("open moved file");
+        assert_eq!(moved.file_id(), source_file_id);
+        let mut contents = [0; 6];
+        assert_eq!(
+            moved.read(&mut contents).await.expect("read moved file"),
+            contents.len()
+        );
+        assert_eq!(&contents, b"source");
+        moved.close().await.expect("close moved file");
+        drop(moved);
+
+        let db = fs.db.as_ref().expect("open database");
+        assert!(db
+            .get(keys::metadata_key(replaced_file_id))
+            .await
+            .expect("read replaced metadata")
+            .is_none());
+        assert!(db
+            .scan_prefix(keys::chunk_prefix(replaced_file_id), ..)
+            .await
+            .expect("scan replaced chunks")
+            .next()
+            .await
+            .expect("read replaced chunk")
+            .is_none());
 
         fs.close().await.expect("close");
     }

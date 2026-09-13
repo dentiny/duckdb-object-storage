@@ -7,7 +7,7 @@ use slatedb::{Db, IsolationLevel};
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_metadata::FileMetadata;
-use crate::keys::metadata_key;
+use crate::keys::{chunk_prefix, metadata_key};
 
 const NEXT_FILE_ID_KEY: &[u8] = b"m/0000000000000000/next_file_id";
 const PATH_PREFIX: &[u8] = b"p/";
@@ -29,6 +29,51 @@ impl DatabaseMetadata {
     pub(crate) async fn file_exists(&self, path: &str) -> Result<bool> {
         validate_path(path)?;
         Ok(self.db.get(path_key(path)).await?.is_some())
+    }
+
+    /// Atomically moves a path mapping, replacing the destination when present.
+    pub(crate) async fn move_file(&self, source: &str, target: &str) -> Result<()> {
+        validate_path(source)?;
+        validate_path(target)?;
+
+        if source == target {
+            return Ok(());
+        }
+
+        let source_key = path_key(source);
+        let target_key = path_key(target);
+        let transaction = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+
+        let source_file_id = transaction
+            .get(&source_key)
+            .await?
+            .ok_or_else(|| {
+                Error::FileNotFound(ErrorStruct::new(
+                    format!("file not found: {source}"),
+                    ErrorStatus::Permanent,
+                ))
+            })
+            .and_then(|bytes| decode_file_id(&bytes, "source path mapping"))?;
+
+        if let Some(target_file_id_bytes) = transaction.get(&target_key).await? {
+            let target_file_id = decode_file_id(&target_file_id_bytes, "target path mapping")?;
+
+            if target_file_id != source_file_id {
+                transaction.delete(metadata_key(target_file_id))?;
+
+                let mut chunks = transaction
+                    .scan_prefix(chunk_prefix(target_file_id), ..)
+                    .await?;
+                while let Some(chunk) = chunks.next().await? {
+                    transaction.delete(chunk.key)?;
+                }
+            }
+        }
+
+        transaction.delete(&source_key)?;
+        transaction.put(&target_key, source_file_id.to_be_bytes())?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Resolves a path to its file ID and metadata, creating both when allowed.
