@@ -92,11 +92,12 @@ impl SlateFileHandle {
     ) -> Result<Self> {
         flags.validate()?;
         let chunk_size = metadata.validated_chunk_size(file_id)?;
+        let position = if flags.append { metadata.size } else { 0 };
 
         Ok(Self {
             db,
             file_id,
-            position: 0,
+            position,
             size: metadata.size,
             modified_at_ms: metadata.modified_at_ms,
             chunk_size,
@@ -379,16 +380,18 @@ impl FileHandle for SlateFileHandle {
     }
 
     async fn write(&mut self, data: &[u8]) -> Result<usize> {
-        self.pwrite(data, self.position).await?;
-        self.position = self
-            .position
-            .checked_add(data.len() as u64)
-            .ok_or_else(|| {
-                Error::InvalidArgument(ErrorStruct::new(
-                    format!("write overflow for file_id {}", self.file_id),
-                    ErrorStatus::Permanent,
-                ))
-            })?;
+        let offset = if self.flags.append {
+            self.size
+        } else {
+            self.position
+        };
+        self.pwrite(data, offset).await?;
+        self.position = offset.checked_add(data.len() as u64).ok_or_else(|| {
+            Error::InvalidArgument(ErrorStruct::new(
+                format!("write overflow for file_id {}", self.file_id),
+                ErrorStatus::Permanent,
+            ))
+        })?;
         Ok(data.len())
     }
 
@@ -583,6 +586,31 @@ mod tests {
         assert_eq!(&boundary, b"xyz");
 
         drop(reopened);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn append_writes_at_end_after_reopen() {
+        let fixture = TestDb::new().await;
+        let mut writer = fixture.handle(6, FileOpenFlags::create());
+        writer.write(b"abc").await.unwrap();
+        writer.close().await.unwrap();
+        drop(writer);
+
+        let mut appender = fixture.reopen(6, FileOpenFlags::append()).await;
+        assert_eq!(appender.seek_position(), 3);
+        appender.seek(0);
+        appender.write(b"def").await.unwrap();
+        assert_eq!(appender.seek_position(), 6);
+        appender.close().await.unwrap();
+        drop(appender);
+
+        let mut reader = fixture.reopen(6, FileOpenFlags::read_only()).await;
+        let mut contents = [0; 6];
+        assert_eq!(reader.read(&mut contents).await.unwrap(), contents.len());
+        assert_eq!(&contents, b"abcdef");
+
+        drop(reader);
         fixture.close().await;
     }
 
