@@ -12,6 +12,8 @@ pub struct FileOpenFlags {
     pub write: bool,
     /// Create the file when it does not exist.
     pub create: bool,
+    /// Write to the end of the file.
+    pub append: bool,
 }
 
 impl FileOpenFlags {
@@ -21,6 +23,7 @@ impl FileOpenFlags {
             read: true,
             write: false,
             create: false,
+            append: false,
         }
     }
 
@@ -30,6 +33,7 @@ impl FileOpenFlags {
             read: true,
             write: true,
             create: false,
+            append: false,
         }
     }
 
@@ -39,6 +43,17 @@ impl FileOpenFlags {
             read: true,
             write: true,
             create: true,
+            append: false,
+        }
+    }
+
+    /// Opens or creates a file for appending.
+    pub fn append() -> Self {
+        Self {
+            read: false,
+            write: true,
+            create: true,
+            append: true,
         }
     }
 
@@ -48,6 +63,8 @@ impl FileOpenFlags {
             "at least one of read or write must be set"
         } else if self.create && !self.write {
             "create requires write access"
+        } else if self.append && !self.write {
+            "append requires write access"
         } else {
             return Ok(());
         };
