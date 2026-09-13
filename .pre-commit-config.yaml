@@ -1,0 +1,20 @@
+repos:
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.35.1
+    hooks:
+      - id: typos
+        args: [--force-exclude]
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt
+        language: system
+        files: '^rust/.*\.rs$'
+        entry: cargo fmt --manifest-path rust/Cargo.toml -- --check
+        pass_filenames: false
+      - id: clippy
+        name: clippy
+        language: system
+        files: '^rust/.*\.rs$'
+        entry: cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
+        pass_filenames: false
