@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
-use slatedb::object_store::local::LocalFileSystem;
-#[cfg(test)]
-use slatedb::object_store::memory::InMemory;
-use slatedb::object_store::ObjectStore;
+use object_store_opendal::OpendalStore;
+use opendal::services::{Fs, Memory};
+use opendal::Operator;
 use slatedb::{Db, IsolationLevel};
 
 use crate::error::{Error, Result};
@@ -32,7 +31,8 @@ pub struct SlateDbFileSystem {
 }
 
 impl SlateDbFileSystem {
-    pub async fn open(database_path: &str, object_store: Arc<dyn ObjectStore>) -> Result<Self> {
+    /// Opens SlateDB on top of an OpenDAL storage operator.
+    pub async fn open(database_path: &str, operator: Operator) -> Result<Self> {
         if database_path.is_empty() {
             return Err(Error::InvalidArgument(ErrorStruct::new(
                 "database path must not be empty".to_string(),
@@ -40,16 +40,24 @@ impl SlateDbFileSystem {
             )));
         }
 
+        let object_store = Arc::new(OpendalStore::new(operator));
         let db = Db::open(database_path, object_store).await?;
         Ok(Self {
             db: Some(Arc::new(db)),
         })
     }
 
-    #[cfg(test)]
-    async fn open_in_memory(database_path: &str) -> Result<Self> {
-        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        Self::open(database_path, object_store).await
+    pub async fn open_in_memory(database_path: &str) -> Result<Self> {
+        let operator = Operator::new(Memory::default()).map_err(|source| {
+            Error::Io(
+                ErrorStruct::new(
+                    "failed to initialize OpenDAL memory storage".to_string(),
+                    ErrorStatus::Permanent,
+                )
+                .with_source(source),
+            )
+        })?;
+        Self::open(database_path, operator).await
     }
 
     pub async fn open_local(
@@ -57,32 +65,24 @@ impl SlateDbFileSystem {
         root: impl AsRef<std::path::Path>,
     ) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
+        let root_str = root.to_str().ok_or_else(|| {
+            Error::InvalidArgument(ErrorStruct::new(
+                format!("local OpenDAL root is not valid UTF-8: {}", root.display()),
+                ErrorStatus::Permanent,
+            ))
+        })?;
         tokio::fs::create_dir_all(&root).await?;
 
-        let local_root = root.clone();
-        let object_store =
-            tokio::task::spawn_blocking(move || LocalFileSystem::new_with_prefix(local_root))
-                .await
-                .map_err(|source| {
-                    Error::Io(
-                        ErrorStruct::new(
-                            "local object store initialization task failed".to_string(),
-                            ErrorStatus::Permanent,
-                        )
-                        .with_source(source),
-                    )
-                })?
-                .map_err(|source| {
-                    Error::Io(
-                        ErrorStruct::new(
-                            format!("failed to open local object store at {}", root.display()),
-                            ErrorStatus::Permanent,
-                        )
-                        .with_source(source),
-                    )
-                })?
-                .with_fsync(true);
-        Self::open(database_path, Arc::new(object_store)).await
+        let operator = Operator::new(Fs::default().root(root_str)).map_err(|source| {
+            Error::Io(
+                ErrorStruct::new(
+                    format!("failed to initialize OpenDAL storage at {}", root.display()),
+                    ErrorStatus::Permanent,
+                )
+                .with_source(source),
+            )
+        })?;
+        Self::open(database_path, operator).await
     }
 
     /// Open a logical file, creating its persistent catalog entry when allowed.

@@ -65,7 +65,14 @@ impl FileOpenFlags {
 
     /// Rejects a mutating operation on a handle opened read-only.
     pub fn ensure_writable(&self, file_id: u64) -> Result<()> {
-        self.ensure(self.write, "write to", file_id)
+        if self.write {
+            return Ok(());
+        }
+
+        Err(Error::ReadOnlyViolation(ErrorStruct::new(
+            format!("cannot write to file_id {file_id}: not opened for that access"),
+            ErrorStatus::Permanent,
+        )))
     }
 
     fn ensure(&self, granted: bool, operation: &str, file_id: u64) -> Result<()> {

@@ -16,14 +16,22 @@ protoc-bin-vendored = "3.2"
 
 [dependencies]
 # https://slatedb.io/ — embedded LSM on object storage.
-# Cloud backends and the optional cache are disabled until the VFS needs them.
 anyhow = "1"
 async-trait = "0.1"
 futures = "0.3"
+object_store_opendal = { version = "0.60", features = ["services-s3"] }
+opendal = { version = "0.59", default-features = false, features = ["services-fs", "services-memory", "services-s3"] }
 prost = "0.14"
-slatedb = { version = "0.15", default-features = false }
+slatedb = { version = "0.16", default-features = false }
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# TODO(hjiang): Remove these patches once the complete OpenDAL 0.59 release is on crates.io.
+# opendal-core's archive omits an included CHANGELOG, and opendal-service-s3
+# 0.59.0 has not been published there yet.
+[patch.crates-io]
+opendal-core = { git = "https://github.com/apache/opendal.git", rev = "3e190ac6bad5b132d397d46a0650367e22e75026" }
+opendal-service-s3 = { git = "https://github.com/apache/opendal.git", rev = "3e190ac6bad5b132d397d46a0650367e22e75026" }
