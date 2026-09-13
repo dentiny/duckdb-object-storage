@@ -4,6 +4,18 @@ use thiserror::Error as ThisError;
 
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 
+/// Stable error codes exposed through the C ABI.
+#[repr(i32)]
+pub enum ErrorCode {
+    MetadataDecode = 1,
+    FileNotFound = 2,
+    FileAlreadyExists = 3,
+    ReadOnlyViolation = 4,
+    SlateDb = 5,
+    InvalidArgument = 6,
+    Io = 7,
+}
+
 /// All errors returned by SlateFS operations.
 #[derive(Clone, Debug, ThisError)]
 pub enum Error {
@@ -18,6 +30,10 @@ pub enum Error {
     /// A file already exists at the given path.
     #[error("{0}")]
     FileAlreadyExists(ErrorStruct),
+
+    /// A mutating operation was attempted through a read-only handle.
+    #[error("{0}")]
+    ReadOnlyViolation(ErrorStruct),
 
     /// An error from the underlying SlateDB.
     #[error("{0}")]
@@ -35,12 +51,26 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    /// Returns the stable code used by C ABI consumers.
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            Error::MetadataDecode(_) => ErrorCode::MetadataDecode,
+            Error::FileNotFound(_) => ErrorCode::FileNotFound,
+            Error::FileAlreadyExists(_) => ErrorCode::FileAlreadyExists,
+            Error::ReadOnlyViolation(_) => ErrorCode::ReadOnlyViolation,
+            Error::SlateDb(_) => ErrorCode::SlateDb,
+            Error::InvalidArgument(_) => ErrorCode::InvalidArgument,
+            Error::Io(_) => ErrorCode::Io,
+        }
+    }
+
     /// Returns whether retrying the failed operation could succeed.
     pub fn status(&self) -> ErrorStatus {
         match self {
             Error::MetadataDecode(inner)
             | Error::FileNotFound(inner)
             | Error::FileAlreadyExists(inner)
+            | Error::ReadOnlyViolation(inner)
             | Error::SlateDb(inner)
             | Error::InvalidArgument(inner)
             | Error::Io(inner) => inner.status,

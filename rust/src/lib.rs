@@ -13,7 +13,7 @@ mod keys;
 mod metadata;
 mod util;
 
-pub use error::{Error, Result};
+pub use error::{Error, ErrorCode, Result};
 pub use error_struct::{ErrorStatus, ErrorStruct};
 pub use file_handle::{FileHandle, SlateFileHandle};
 pub use flags::FileOpenFlags;

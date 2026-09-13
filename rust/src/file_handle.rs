@@ -643,11 +643,11 @@ mod tests {
         let mut read_only = fixture.reopen(4, FileOpenFlags::read_only()).await;
         assert!(matches!(
             read_only.pwrite(b"z", 0).await,
-            Err(Error::InvalidArgument(_))
+            Err(Error::ReadOnlyViolation(_))
         ));
         assert!(matches!(
             read_only.truncate(0).await,
-            Err(Error::InvalidArgument(_))
+            Err(Error::ReadOnlyViolation(_))
         ));
 
         drop(read_only);
