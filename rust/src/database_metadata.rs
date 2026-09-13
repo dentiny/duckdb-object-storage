@@ -22,18 +22,22 @@ impl DatabaseMetadata {
         Self { db }
     }
 
+    /// Returns whether a path has a catalog entry.
+    ///
+    /// Existence is intentionally determined by the path mapping alone. It
+    /// does not read file metadata or scan chunks.
+    pub(crate) async fn file_exists(&self, path: &str) -> Result<bool> {
+        validate_path(path)?;
+        Ok(self.db.get(path_key(path)).await?.is_some())
+    }
+
     /// Resolves a path to its file ID and metadata, creating both when allowed.
     pub(crate) async fn get_or_create_file(
         &self,
         path: &str,
         create: bool,
     ) -> Result<(u64, FileMetadata)> {
-        if path.is_empty() {
-            return Err(Error::InvalidArgument(ErrorStruct::new(
-                "file path must not be empty".to_string(),
-                ErrorStatus::Permanent,
-            )));
-        }
+        validate_path(path)?;
 
         let path_key = path_key(path);
         let transaction = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
@@ -80,6 +84,16 @@ impl DatabaseMetadata {
 
         Ok((file_id, metadata))
     }
+}
+
+fn validate_path(path: &str) -> Result<()> {
+    if path.is_empty() {
+        return Err(Error::InvalidArgument(ErrorStruct::new(
+            "file path must not be empty".to_string(),
+            ErrorStatus::Permanent,
+        )));
+    }
+    Ok(())
 }
 
 fn path_key(path: &str) -> Vec<u8> {
