@@ -9,7 +9,6 @@ use std::fmt;
 enum Prefix {
     Chunk,
     Metadata,
-    #[allow(dead_code)]
     Path,
 }
 
@@ -47,13 +46,11 @@ pub(crate) fn metadata_key(file_id: u64) -> Vec<u8> {
 }
 
 /// Returns the reserved metadata key holding the next available file ID.
-#[allow(dead_code)]
 pub(crate) fn next_file_id_key() -> Vec<u8> {
     format!("{}0000000000000000/next_file_id", Prefix::Metadata).into_bytes()
 }
 
 /// Returns `p/<path>`.
-#[allow(dead_code)]
 pub(crate) fn path_key(path: &str) -> Vec<u8> {
     format!("{}{path}", Prefix::Path).into_bytes()
 }
