@@ -219,6 +219,14 @@ mod tests {
         created.close().await.expect("close created file");
         drop(created);
 
+        let mut other = fs
+            .open_file("other.db", FileOpenFlags::create())
+            .await
+            .expect("create second file");
+        assert_eq!(other.file_id(), 2);
+        other.close().await.expect("close second file");
+        drop(other);
+
         let mut reopened = fs
             .open_file("database.db", FileOpenFlags::read_only())
             .await
