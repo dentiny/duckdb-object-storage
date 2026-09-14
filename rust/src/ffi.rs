@@ -421,12 +421,6 @@ pub extern "C" fn slatedb_fs_name() -> *const c_char {
     NAME.as_ptr().cast()
 }
 
-#[no_mangle]
-pub extern "C" fn slatedb_fs_dummy_error() -> *const c_char {
-    static MSG: &[u8] = b"SlateDBFileSystem is a dummy implementation and cannot open files yet\0";
-    MSG.as_ptr().cast()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -17,10 +17,6 @@ pub const PREFIX: &str = "duckdb_objfs:";
 /// Name reported to DuckDB via `FileSystem::GetName`.
 pub const NAME: &str = "SlateDBFileSystem";
 
-/// Distinctive error so SQL tests can confirm VFS routing.
-pub const DUMMY_ERROR: &str =
-    "SlateDBFileSystem is a dummy implementation and cannot open files yet";
-
 /// SlateDB-backed filesystem owner.
 ///
 /// One live database is kept for the lifetime of the filesystem. The FFI layer
@@ -156,10 +152,6 @@ impl SlateDbFileSystem {
 
     pub fn can_handle(&self, path: &str) -> bool {
         path.starts_with(PREFIX)
-    }
-
-    pub fn dummy_error(&self) -> &'static str {
-        DUMMY_ERROR
     }
 }
 
