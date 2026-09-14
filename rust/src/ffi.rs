@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::{FileHandle, SlateFileHandle};
 use crate::flags::FileOpenFlags;
-use crate::fs::SlateDbFileSystem;
+use crate::fs::{S3StorageConfig, SlateDbFileSystem};
 
 const DATABASE_PATH: &str = "duckdb-object-storage";
 
@@ -23,6 +23,19 @@ pub struct FfiOpenOptions {
     create: i32,
     append: i32,
     truncate_existing: i32,
+}
+
+#[repr(C)]
+pub struct FfiS3Config {
+    bucket: *const c_char,
+    root: *const c_char,
+    endpoint: *const c_char,
+    region: *const c_char,
+    key_id: *const c_char,
+    secret: *const c_char,
+    session_token: *const c_char,
+    use_ssl: i32,
+    virtual_host_style: i32,
 }
 
 /// Synchronous FFI context owning the one async runtime used by this
@@ -88,6 +101,37 @@ unsafe fn require_path<'a>(path: *const c_char, name: &str) -> Result<&'a str> {
         .map_err(|_| invalid_argument(format!("{name} must be valid UTF-8")))
 }
 
+unsafe fn optional_string(value: *const c_char, name: &str) -> Result<Option<String>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let value = unsafe { CStr::from_ptr(value) }
+        .to_str()
+        .map_err(|_| invalid_argument(format!("{name} must be valid UTF-8")))?;
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value.to_string()))
+    }
+}
+
+unsafe fn require_s3_config(config: *const FfiS3Config) -> Result<S3StorageConfig> {
+    let config =
+        unsafe { config.as_ref() }.ok_or_else(|| invalid_argument("S3 config must not be null"))?;
+    let bucket = unsafe { require_path(config.bucket, "S3 bucket")? }.to_string();
+    Ok(S3StorageConfig {
+        bucket,
+        root: unsafe { optional_string(config.root, "S3 root")? },
+        endpoint: unsafe { optional_string(config.endpoint, "S3 endpoint")? },
+        region: unsafe { optional_string(config.region, "S3 region")? },
+        key_id: unsafe { optional_string(config.key_id, "S3 key ID")? },
+        secret: unsafe { optional_string(config.secret, "S3 secret")? },
+        session_token: unsafe { optional_string(config.session_token, "S3 session token")? },
+        use_ssl: config.use_ssl != 0,
+        virtual_host_style: config.virtual_host_style != 0,
+    })
+}
+
 unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlags> {
     let options = unsafe { options.as_ref() }
         .ok_or_else(|| invalid_argument("open options must not be null"))?;
@@ -142,24 +186,69 @@ unsafe fn write_buffer<'a>(buffer: *const u8, len: usize) -> Result<&'a [u8]> {
     Ok(unsafe { slice::from_raw_parts(buffer, len) })
 }
 
+fn create_runtime() -> Result<Arc<Runtime>> {
+    tokio::runtime::Builder::new_multi_thread()
+        // TODO(hjiang): Tune the worker count.
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .map(Arc::new)
+        .map_err(|source| {
+            Error::Io(
+                ErrorStruct::new(
+                    "failed to initialize Tokio runtime".to_string(),
+                    ErrorStatus::Permanent,
+                )
+                .with_source(source),
+            )
+        })
+}
+
 #[no_mangle]
-pub extern "C" fn slatedb_fs_create() -> *mut FfiFileSystem {
-    catch_unwind(AssertUnwindSafe(|| {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            // TODO(hjiang): Tune the worker count.
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .ok()
-            .map(Arc::new)?;
-        let fs = runtime
-            .block_on(SlateDbFileSystem::open_in_memory(DATABASE_PATH))
-            .ok()?;
-        Some(Box::into_raw(Box::new(FfiFileSystem { runtime, fs })))
-    }))
-    .ok()
-    .flatten()
-    .unwrap_or(ptr::null_mut())
+pub unsafe extern "C" fn slatedb_fs_create_memory(output: *mut *mut FfiFileSystem) -> i32 {
+    ffi_result(|| {
+        let output = unsafe { require_output(output, "filesystem output")? };
+        *output = ptr::null_mut();
+        let runtime = create_runtime()?;
+        let fs = runtime.block_on(SlateDbFileSystem::open_in_memory(DATABASE_PATH))?;
+        *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_fs_create_local(
+    root: *const c_char,
+    output: *mut *mut FfiFileSystem,
+) -> i32 {
+    ffi_result(|| {
+        let output = unsafe { require_output(output, "filesystem output")? };
+        *output = ptr::null_mut();
+        let root = unsafe { require_path(root, "local root")? };
+        if root.is_empty() {
+            return Err(invalid_argument("local root must not be empty"));
+        }
+        let runtime = create_runtime()?;
+        let fs = runtime.block_on(SlateDbFileSystem::open_local(DATABASE_PATH, root))?;
+        *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_fs_create_s3(
+    config: *const FfiS3Config,
+    output: *mut *mut FfiFileSystem,
+) -> i32 {
+    ffi_result(|| {
+        let output = unsafe { require_output(output, "filesystem output")? };
+        *output = ptr::null_mut();
+        let config = unsafe { require_s3_config(config)? };
+        let runtime = create_runtime()?;
+        let fs = runtime.block_on(SlateDbFileSystem::open_s3(DATABASE_PATH, config))?;
+        *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
+        Ok(())
+    })
 }
 
 #[no_mangle]
@@ -456,7 +545,8 @@ mod tests {
     }
 
     unsafe fn create_fs() -> *mut FfiFileSystem {
-        let fs = slatedb_fs_create();
+        let mut fs = ptr::null_mut();
+        expect_ok(slatedb_fs_create_memory(&mut fs));
         assert!(!fs.is_null());
         fs
     }
@@ -485,6 +575,52 @@ mod tests {
             expect_ok(slatedb_fs_file_exists(fs, path.as_ptr(), &mut exists));
         }
         exists != 0
+    }
+
+    #[test]
+    fn ffi_s3_constructor_validates_config() {
+        unsafe {
+            let bucket = CString::new("").unwrap();
+            let config = FfiS3Config {
+                bucket: bucket.as_ptr(),
+                root: ptr::null(),
+                endpoint: ptr::null(),
+                region: ptr::null(),
+                key_id: ptr::null(),
+                secret: ptr::null(),
+                session_token: ptr::null(),
+                use_ssl: 1,
+                virtual_host_style: 0,
+            };
+            let mut fs = ptr::null_mut();
+
+            assert_eq!(
+                slatedb_fs_create_s3(&config, &mut fs),
+                crate::error::ErrorCode::InvalidArgument as i32
+            );
+            assert!(fs.is_null());
+            let message = CStr::from_ptr(slatedb_fs_last_error_message()).to_string_lossy();
+            assert!(message.contains("S3 bucket must not be empty"));
+        }
+    }
+
+    #[test]
+    fn ffi_local_constructor_validates_and_opens_root() {
+        unsafe {
+            let empty = CString::new("").unwrap();
+            let mut fs = ptr::null_mut();
+            assert_eq!(
+                slatedb_fs_create_local(empty.as_ptr(), &mut fs),
+                crate::error::ErrorCode::InvalidArgument as i32
+            );
+            assert!(fs.is_null());
+
+            let root = tempfile::tempdir().expect("temporary local root");
+            let root = CString::new(root.path().to_str().expect("UTF-8 local root")).unwrap();
+            expect_ok(slatedb_fs_create_local(root.as_ptr(), &mut fs));
+            assert!(!fs.is_null());
+            slatedb_fs_destroy(fs);
+        }
     }
 
     #[test]

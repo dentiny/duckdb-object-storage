@@ -1,0 +1,30 @@
+INSTALL httpfs;
+LOAD httpfs;
+LOAD duckdb_object_storage;
+
+CREATE OR REPLACE SECRET duckdb_objfs_s3 (
+    TYPE S3,
+    PROVIDER CONFIG,
+    KEY_ID getenv('AWS_ACCESS_KEY_ID'),
+    SECRET getenv('AWS_SECRET_ACCESS_KEY'),
+    REGION 'us-east-1',
+    ENDPOINT '__S3_ENDPOINT__',
+    USE_SSL false,
+    URL_STYLE 'path',
+    SCOPE 's3://__S3_BUCKET__'
+);
+
+SET duckdb_objfs_backend = 's3';
+SET duckdb_objfs_bucket = '__S3_BUCKET__';
+SET duckdb_objfs_root = '__S3_ROOT__';
+
+ATTACH 'duckdb_objfs://integration.db' AS object_db;
+CREATE TABLE object_db.items(i INTEGER);
+INSERT INTO object_db.items VALUES (1), (2);
+CHECKPOINT object_db;
+DETACH object_db;
+
+ATTACH 'duckdb_objfs://integration.db' AS object_db (READ_ONLY);
+SELECT CASE WHEN sum(i) = 3 THEN true ELSE error('unexpected object-storage result') END
+FROM object_db.items;
+DETACH object_db;

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use object_store_opendal::OpendalStore;
-use opendal::services::{Fs, Memory};
+use opendal::services::{Fs, Memory, S3};
 use opendal::Operator;
 use slatedb::Db;
 
@@ -25,6 +25,18 @@ pub struct SlateDbFileSystem {
     db: Option<Arc<Db>>,
 }
 
+pub struct S3StorageConfig {
+    pub bucket: String,
+    pub root: Option<String>,
+    pub endpoint: Option<String>,
+    pub region: Option<String>,
+    pub key_id: Option<String>,
+    pub secret: Option<String>,
+    pub session_token: Option<String>,
+    pub use_ssl: bool,
+    pub virtual_host_style: bool,
+}
+
 impl SlateDbFileSystem {
     /// Opens SlateDB on top of an OpenDAL storage operator.
     pub async fn open(database_path: &str, operator: Operator) -> Result<Self> {
@@ -40,6 +52,11 @@ impl SlateDbFileSystem {
         Ok(Self {
             db: Some(Arc::new(db)),
         })
+    }
+
+    pub async fn open_s3(database_path: &str, config: S3StorageConfig) -> Result<Self> {
+        let operator = build_s3_operator(config)?;
+        Self::open(database_path, operator).await
     }
 
     pub async fn open_in_memory(database_path: &str) -> Result<Self> {
@@ -153,6 +170,73 @@ impl SlateDbFileSystem {
     pub fn can_handle(&self, path: &str) -> bool {
         path.starts_with(PREFIX)
     }
+}
+
+fn build_s3_operator(config: S3StorageConfig) -> Result<Operator> {
+    if config.bucket.is_empty() {
+        return Err(Error::InvalidArgument(ErrorStruct::new(
+            "S3 bucket must not be empty".to_string(),
+            ErrorStatus::Permanent,
+        )));
+    }
+    if config.key_id.is_some() != config.secret.is_some() {
+        return Err(Error::InvalidArgument(ErrorStruct::new(
+            "S3 key ID and secret must be provided together".to_string(),
+            ErrorStatus::Permanent,
+        )));
+    }
+    if config.session_token.is_some() && config.key_id.is_none() {
+        return Err(Error::InvalidArgument(ErrorStruct::new(
+            "S3 session token requires a key ID and secret".to_string(),
+            ErrorStatus::Permanent,
+        )));
+    }
+
+    // Static libraries do not reliably run OpenDAL's process constructor.
+    opendal::install_default();
+
+    let mut builder = S3::default()
+        .bucket(&config.bucket)
+        .disable_config_load()
+        .disable_ec2_metadata();
+
+    if let Some(root) = config.root {
+        builder = builder.root(&root);
+    }
+    if let Some(endpoint) = config.endpoint {
+        let endpoint = if endpoint.contains("://") {
+            endpoint
+        } else if config.use_ssl {
+            format!("https://{endpoint}")
+        } else {
+            format!("http://{endpoint}")
+        };
+        builder = builder.endpoint(&endpoint);
+    }
+    if let Some(region) = config.region {
+        builder = builder.region(&region);
+    }
+    if let (Some(key_id), Some(secret)) = (config.key_id, config.secret) {
+        builder = builder.access_key_id(&key_id).secret_access_key(&secret);
+        if let Some(session_token) = config.session_token {
+            builder = builder.session_token(&session_token);
+        }
+    } else {
+        builder = builder.skip_signature();
+    }
+    if config.virtual_host_style {
+        builder = builder.enable_virtual_host_style();
+    }
+
+    Operator::new(builder).map_err(|source| {
+        Error::Io(
+            ErrorStruct::new(
+                "failed to initialize OpenDAL S3 storage".to_string(),
+                ErrorStatus::Permanent,
+            )
+            .with_source(source),
+        )
+    })
 }
 
 #[cfg(test)]

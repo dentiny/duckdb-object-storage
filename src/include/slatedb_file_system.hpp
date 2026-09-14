@@ -4,6 +4,7 @@
 #include "slatedb_fs.h"
 
 #include <memory>
+#include <mutex>
 
 namespace duckdb {
 
@@ -15,6 +16,7 @@ struct SlateDBFsDeleter {
 class SlateDBFileSystem : public FileSystem {
 public:
 	SlateDBFileSystem();
+	static unique_ptr<SlateDBFileSystem> CreateInMemory();
 
 	unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
 	                                optional_ptr<FileOpener> opener = nullptr) override;
@@ -44,6 +46,9 @@ public:
 	std::string GetName() const override;
 
 private:
+	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener);
+
+	std::mutex initialization_lock;
 	unique_ptr<slatedb_fs, SlateDBFsDeleter> impl;
 };
 
