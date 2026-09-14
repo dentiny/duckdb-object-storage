@@ -8,11 +8,7 @@
 namespace duckdb {
 
 struct SlateDBFsDeleter {
-	void operator()(slatedb_fs *ptr) const {
-		if (ptr) {
-			slatedb_fs_destroy(ptr);
-		}
-	}
+	void operator()(slatedb_fs *ptr) const;
 };
 
 //! DuckDB filesystem adapter over the Rust SlateDB crate.

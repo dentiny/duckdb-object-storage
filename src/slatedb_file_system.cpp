@@ -33,6 +33,12 @@ size_t CheckedSize(int64_t size, const string &operation) {
 
 } // namespace
 
+void SlateDBFsDeleter::operator()(slatedb_fs *ptr) const {
+	if (ptr) {
+		slatedb_fs_destroy(ptr);
+	}
+}
+
 SlateDBFileSystem::SlateDBFileSystem() {
 	auto *ptr = slatedb_fs_create();
 	if (!ptr) {

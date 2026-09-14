@@ -19,6 +19,7 @@ struct SlateDBFileHandleDeleter {
 
 class SlateDBFileHandle : public FileHandle {
 public:
+	// `handle`'s ownership is transferred to the current handle.
 	SlateDBFileHandle(FileSystem &file_system, string path, FileOpenFlags flags, slatedb_file_handle *handle);
 	~SlateDBFileHandle() override;
 
