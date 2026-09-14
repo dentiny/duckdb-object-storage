@@ -16,6 +16,8 @@ pub struct FileOpenFlags {
     pub append: bool,
     /// Create the file if missing, or clear it before opening if it exists.
     pub truncate_existing: bool,
+    /// Fail when the path already exists.
+    pub exclusive_create: bool,
 }
 
 impl FileOpenFlags {
@@ -27,6 +29,7 @@ impl FileOpenFlags {
             create: false,
             append: false,
             truncate_existing: false,
+            exclusive_create: false,
         }
     }
 
@@ -38,6 +41,7 @@ impl FileOpenFlags {
             create: false,
             append: false,
             truncate_existing: false,
+            exclusive_create: false,
         }
     }
 
@@ -49,6 +53,7 @@ impl FileOpenFlags {
             create: true,
             append: false,
             truncate_existing: false,
+            exclusive_create: false,
         }
     }
 
@@ -60,6 +65,7 @@ impl FileOpenFlags {
             create: true,
             append: false,
             truncate_existing: true,
+            exclusive_create: false,
         }
     }
 
@@ -71,6 +77,7 @@ impl FileOpenFlags {
             create: true,
             append: true,
             truncate_existing: false,
+            exclusive_create: false,
         }
     }
 
@@ -84,6 +91,8 @@ impl FileOpenFlags {
             "append requires write access"
         } else if self.truncate_existing && !self.create {
             "truncate existing requires create"
+        } else if self.exclusive_create && !self.create {
+            "exclusive create requires create"
         } else {
             return Ok(());
         };

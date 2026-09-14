@@ -111,6 +111,7 @@ impl DatabaseMetadata {
         path: &str,
         create: bool,
         truncate_existing: bool,
+        exclusive_create: bool,
     ) -> Result<(u64, FileMetadata)> {
         validate_path(path)?;
 
@@ -118,6 +119,12 @@ impl DatabaseMetadata {
         let transaction = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
 
         if let Some(file_id_bytes) = transaction.get(&path_key).await? {
+            if exclusive_create {
+                return Err(Error::FileAlreadyExists(ErrorStruct::new(
+                    format!("file already exists: {path}"),
+                    ErrorStatus::Permanent,
+                )));
+            }
             let file_id = decode_file_id(&file_id_bytes, "path mapping")?;
             let metadata = transaction
                 .get(metadata_key(file_id))

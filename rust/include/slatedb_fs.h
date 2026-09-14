@@ -16,6 +16,7 @@ typedef struct slatedb_fs_open_options {
 	int32_t create;
 	int32_t append;
 	int32_t truncate_existing;
+	int32_t exclusive_create;
 } slatedb_fs_open_options;
 
 typedef struct slatedb_s3_config {
