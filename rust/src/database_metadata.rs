@@ -105,8 +105,8 @@ impl DatabaseMetadata {
         Ok(())
     }
 
-    /// Resolves a path to its file ID and metadata, creating both when allowed.
-    pub(crate) async fn get_or_create_file(
+    /// Prepares a path for opening, creating or truncating it when requested.
+    pub(crate) async fn prepare_file_for_open(
         &self,
         path: &str,
         create: bool,
