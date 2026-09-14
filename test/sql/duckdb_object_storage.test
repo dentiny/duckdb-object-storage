@@ -26,7 +26,7 @@ true
 statement error
 SELECT * FROM glob('duckdb_objfs://dummy/**');
 ----
-dummy implementation
+SlateDBFileSystem::Glob is not implemented
 
 # DuckDB can create, checkpoint, detach, and reopen a database through SlateDB
 statement ok

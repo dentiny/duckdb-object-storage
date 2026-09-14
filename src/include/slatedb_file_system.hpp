@@ -44,8 +44,6 @@ public:
 	std::string GetName() const override;
 
 private:
-	[[noreturn]] void ThrowDummy() const;
-
 	unique_ptr<slatedb_fs, SlateDBFsDeleter> impl;
 };
 

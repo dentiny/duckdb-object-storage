@@ -57,7 +57,6 @@ const char *slatedb_fs_last_error_message(void);
 
 int slatedb_fs_can_handle(const slatedb_fs *fs, const char *path);
 const char *slatedb_fs_name(void);
-const char *slatedb_fs_dummy_error(void);
 
 #ifdef __cplusplus
 }

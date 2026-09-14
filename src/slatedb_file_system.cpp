@@ -143,7 +143,7 @@ void SlateDBFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpen
 }
 
 vector<OpenFileInfo> SlateDBFileSystem::Glob(const string &, FileOpener *) {
-	ThrowDummy();
+	throw NotImplementedException("SlateDBFileSystem::Glob is not implemented");
 }
 
 bool SlateDBFileSystem::FileExists(const string &filename, optional_ptr<FileOpener>) {
@@ -153,11 +153,11 @@ bool SlateDBFileSystem::FileExists(const string &filename, optional_ptr<FileOpen
 }
 
 bool SlateDBFileSystem::DirectoryExists(const string &, optional_ptr<FileOpener>) {
-	ThrowDummy();
+	throw NotImplementedException("SlateDBFileSystem::DirectoryExists is not implemented");
 }
 
 bool SlateDBFileSystem::ListFiles(const string &, const std::function<void(const string &, bool)> &, FileOpener *) {
-	ThrowDummy();
+	throw NotImplementedException("SlateDBFileSystem::ListFiles is not implemented");
 }
 
 bool SlateDBFileSystem::CanHandleFile(const string &fpath) {
@@ -174,10 +174,6 @@ string SlateDBFileSystem::CanonicalizePath(const string &path, optional_ptr<File
 
 std::string SlateDBFileSystem::GetName() const {
 	return slatedb_fs_name();
-}
-
-[[noreturn]] void SlateDBFileSystem::ThrowDummy() const {
-	throw NotImplementedException("%s", slatedb_fs_dummy_error());
 }
 
 } // namespace duckdb
