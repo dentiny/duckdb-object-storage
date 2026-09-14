@@ -1,9 +1,9 @@
 use std::any::Any;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::runtime::Runtime;
 
@@ -17,7 +17,6 @@ const DATABASE_PATH: &str = "duckdb-object-storage";
 
 #[repr(C)]
 pub struct FfiOpenOptions {
-    struct_size: usize,
     read: i32,
     write: i32,
     create: i32,
@@ -34,13 +33,12 @@ pub struct FfiFileSystem {
 
 pub struct FfiFileHandle {
     runtime: Arc<Runtime>,
-    handle: Mutex<Option<SlateFileHandle>>,
+    handle: Option<SlateFileHandle>,
 }
 
 thread_local! {
     static LAST_ERROR_MESSAGE: RefCell<CString> =
         RefCell::new(CString::new("").expect("empty string has no NUL"));
-    static LAST_ERROR_RETRYABLE: Cell<i32> = const { Cell::new(0) };
 }
 
 fn invalid_argument(message: impl Into<String>) -> Error {
@@ -59,11 +57,9 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
 
 fn store_error(error: Error) -> i32 {
     let code = error.code() as i32;
-    let retryable = i32::from(error.status() == ErrorStatus::Temporary);
     let message = CString::new(error.to_string().replace('\0', "\\0"))
         .expect("escaped error message cannot contain NUL");
     LAST_ERROR_MESSAGE.with(|slot| *slot.borrow_mut() = message);
-    LAST_ERROR_RETRYABLE.with(|slot| slot.set(retryable));
     code
 }
 
@@ -94,9 +90,6 @@ unsafe fn require_path<'a>(path: *const c_char, name: &str) -> Result<&'a str> {
 unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlags> {
     let options = unsafe { options.as_ref() }
         .ok_or_else(|| invalid_argument("open options must not be null"))?;
-    if options.struct_size < std::mem::size_of::<FfiOpenOptions>() {
-        return Err(invalid_argument("open options struct is too small"));
-    }
     Ok(FileOpenFlags {
         read: options.read != 0,
         write: options.write != 0,
@@ -138,20 +131,6 @@ pub unsafe extern "C" fn slatedb_fs_destroy(fs: *mut FfiFileSystem) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_fs_open_options_init(options: *mut FfiOpenOptions) {
-    if let Some(options) = unsafe { options.as_mut() } {
-        *options = FfiOpenOptions {
-            struct_size: std::mem::size_of::<FfiOpenOptions>(),
-            read: 0,
-            write: 0,
-            create: 0,
-            append: 0,
-            truncate_existing: 0,
-        };
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn slatedb_fs_open_file(
     fs: *const FfiFileSystem,
     path: *const c_char,
@@ -168,26 +147,22 @@ pub unsafe extern "C" fn slatedb_fs_open_file(
         let handle = fs.runtime.block_on(fs.fs.open_file(path, flags))?;
         *output = Box::into_raw(Box::new(FfiFileHandle {
             runtime: Arc::clone(&fs.runtime),
-            handle: Mutex::new(Some(handle)),
+            handle: Some(handle),
         }));
         Ok(())
     })
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_file_close(handle: *const FfiFileHandle) -> i32 {
+pub unsafe extern "C" fn slatedb_file_close(handle: *mut FfiFileHandle) -> i32 {
     ffi_result(|| {
-        let handle = unsafe { handle.as_ref() }
+        let handle = unsafe { handle.as_mut() }
             .ok_or_else(|| invalid_argument("file handle pointer must not be null"))?;
-        let mut guard = handle
-            .handle
-            .lock()
-            .map_err(|_| invalid_argument("file handle lock is poisoned"))?;
-        let Some(file) = guard.as_mut() else {
+        let Some(file) = handle.handle.as_mut() else {
             return Ok(());
         };
         handle.runtime.block_on(file.close())?;
-        *guard = None;
+        handle.handle = None;
         Ok(())
     })
 }
@@ -201,11 +176,6 @@ pub unsafe extern "C" fn slatedb_file_destroy(handle: *mut FfiFileHandle) {
     let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
         drop(Box::from_raw(handle));
     }));
-}
-
-#[no_mangle]
-pub extern "C" fn slatedb_fs_last_error_is_retryable() -> i32 {
-    LAST_ERROR_RETRYABLE.with(Cell::get)
 }
 
 #[no_mangle]
@@ -262,17 +232,12 @@ mod tests {
             let path = CString::new("database.db").unwrap();
 
             let mut options = FfiOpenOptions {
-                struct_size: 0,
-                read: 0,
-                write: 0,
-                create: 0,
+                read: 1,
+                write: 1,
+                create: 1,
                 append: 0,
                 truncate_existing: 0,
             };
-            slatedb_fs_open_options_init(&mut options);
-            options.read = 1;
-            options.write = 1;
-            options.create = 1;
 
             let mut handle = ptr::null_mut();
             expect_ok(slatedb_fs_open_file(
@@ -292,7 +257,6 @@ mod tests {
             let missing = CString::new("missing.db").unwrap();
             let missing_error = slatedb_fs_open_file(fs, missing.as_ptr(), &options, &mut handle);
             assert_eq!(missing_error, crate::ErrorCode::FileNotFound as i32);
-            assert_eq!(slatedb_fs_last_error_is_retryable(), 0);
             assert!(handle.is_null());
 
             slatedb_fs_destroy(fs);
