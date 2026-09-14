@@ -50,7 +50,7 @@ statement ok
 DETACH object_db
 
 statement ok
-ATTACH 'duckdb_objfs://integration.db' AS object_db
+ATTACH 'duckdb_objfs://integration.db' AS object_db (READ_ONLY)
 
 query I
 SELECT sum(i) FROM object_db.items
