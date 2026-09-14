@@ -8,20 +8,30 @@
 namespace duckdb {
 
 struct SlateDBFsDeleter {
-	void operator()(slatedb_fs *ptr) const {
-		if (ptr) {
-			slatedb_fs_destroy(ptr);
-		}
-	}
+	void operator()(slatedb_fs *ptr) const;
 };
 
-//! DuckDB filesystem adapter over the Rust SlateDB crate. File I/O is dummy.
+//! DuckDB filesystem adapter over the Rust SlateDB crate.
 class SlateDBFileSystem : public FileSystem {
 public:
 	SlateDBFileSystem();
 
 	unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
 	                                optional_ptr<FileOpener> opener = nullptr) override;
+	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
+	void Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
+	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
+	int64_t Write(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
+	int64_t GetFileSize(FileHandle &handle) override;
+	void Truncate(FileHandle &handle, int64_t new_size) override;
+	void FileSync(FileHandle &handle) override;
+	void Seek(FileHandle &handle, idx_t location) override;
+	idx_t SeekPosition(FileHandle &handle) override;
+	bool CanSeek() override;
+	bool OnDiskFile(FileHandle &handle) override;
+
+	void MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener = nullptr) override;
+	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
 	bool FileExists(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
 	bool DirectoryExists(const string &directory, optional_ptr<FileOpener> opener = nullptr) override;
@@ -30,6 +40,7 @@ public:
 
 	bool CanHandleFile(const string &fpath) override;
 	string PathSeparator(const string &path) override;
+	string CanonicalizePath(const string &path, optional_ptr<FileOpener> opener = nullptr) override;
 	std::string GetName() const override;
 
 private:
