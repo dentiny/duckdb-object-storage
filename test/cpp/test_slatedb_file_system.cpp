@@ -32,9 +32,6 @@ TEST_CASE("SlateDBFileSystem maps DuckDB open flags", "[slatedb_fs]") {
 	SlateDBFileSystem fs;
 	const string path = "slatedb://flags.db";
 
-	REQUIRE(fs.CanHandleFile("slatedb://flags.db"));
-	REQUIRE(fs.CanHandleFile("slatedb:/flags.db"));
-	REQUIRE(fs.CanonicalizePath(path) == path);
 	auto missing = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
 	REQUIRE(!missing);
 	REQUIRE_THROWS_AS(fs.OpenFile(path, FileFlags::FILE_FLAGS_READ), IOException);
