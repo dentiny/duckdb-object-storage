@@ -1,4 +1,5 @@
 #include "slatedb_file_system.hpp"
+#include "slatedb_ffi_utils.hpp"
 #include "slatedb_file_handle.hpp"
 
 #include "duckdb/common/exception.hpp"

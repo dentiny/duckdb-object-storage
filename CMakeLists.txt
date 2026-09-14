@@ -15,8 +15,9 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 project(${TARGET_NAME})
 include_directories(src/include rust/include)
 
-set(EXTENSION_SOURCES src/duckdb_object_storage_extension.cpp
-                      src/slatedb_file_handle.cpp src/slatedb_file_system.cpp)
+set(EXTENSION_SOURCES
+    src/duckdb_object_storage_extension.cpp src/slatedb_ffi_utils.cpp
+    src/slatedb_file_handle.cpp src/slatedb_file_system.cpp)
 
 # ---------------------------------------------------------------------------
 # SlateDB rust crate (https://slatedb.io/)

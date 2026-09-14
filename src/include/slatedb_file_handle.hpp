@@ -7,12 +7,6 @@
 
 namespace duckdb {
 
-namespace slatedb_ffi {
-
-void ThrowIfError(int32_t code, const string &operation);
-
-} // namespace slatedb_ffi
-
 struct SlateDBFileHandleDeleter {
 	void operator()(slatedb_file_handle *ptr) const;
 };
