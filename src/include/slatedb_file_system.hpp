@@ -47,6 +47,7 @@ public:
 	std::string GetName() const override;
 
 private:
+	void EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> opener);
 	void InitializeMemory();
 	void InitializeLocal(const string &root);
 	void InitializeS3(optional_ptr<FileOpener> opener);

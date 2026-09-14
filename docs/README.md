@@ -86,6 +86,26 @@ The URI does not contain the local directory, S3 bucket, or physical object
 key. `duckdb_objfs_root` selects the local directory or S3 object prefix;
 SlateDB owns the physical layout below that location.
 
+## File placement
+
+The native DuckDB database and every file needed for durable recovery stay in
+object storage:
+
+- the main database file;
+- the write-ahead log (`.wal`);
+- checkpoint and recovery WAL files (`.wal.checkpoint` and `.wal.recovery`).
+
+Machine-local runtime files do not belong in object storage. DuckDB spill
+files (`duckdb_temp_storage_*.tmp` and `duckdb_temp_block-*.block`) continue to
+use its `temp_directory`. If that setting points at a `duckdb_objfs://` path,
+the extension replaces it with a unique local directory before opening the
+object database. Set `temp_directory` to an explicit local path before
+`ATTACH` to control its location.
+
+Other files are routed by their own path. Extension binaries, persisted
+secrets, logs, and local `COPY` outputs stay local unless their path explicitly
+uses `duckdb_objfs://`.
+
 ## Read-only reopen
 
 ```sql
