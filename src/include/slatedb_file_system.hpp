@@ -47,6 +47,9 @@ public:
 	std::string GetName() const override;
 
 private:
+	void InitializeMemory();
+	void InitializeLocal(const string &root);
+	void InitializeS3(optional_ptr<FileOpener> opener);
 	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener);
 
 	mutex initialization_lock;

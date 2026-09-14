@@ -46,18 +46,38 @@ SlateDBFileSystem::SlateDBFileSystem() {
 
 unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateInMemory() {
 	auto result = make_uniq<SlateDBFileSystem>();
-	slatedb_fs *ptr = nullptr;
-	ThrowSlateDBError(slatedb_fs_create_memory(&ptr), "initialize in-memory SlateDB filesystem");
-	result->impl.reset(ptr);
+	result->InitializeMemory();
 	return result;
 }
 
 unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocal(const string &root) {
 	auto result = make_uniq<SlateDBFileSystem>();
+	result->InitializeLocal(root);
+	return result;
+}
+
+void SlateDBFileSystem::InitializeMemory() {
+	slatedb_fs *ptr = nullptr;
+	ThrowSlateDBError(slatedb_fs_create_memory(&ptr), "initialize in-memory SlateDB filesystem");
+	impl.reset(ptr);
+}
+
+void SlateDBFileSystem::InitializeLocal(const string &root) {
 	slatedb_fs *ptr = nullptr;
 	ThrowSlateDBError(slatedb_fs_create_local(root.c_str(), &ptr), "initialize local SlateDB filesystem");
-	result->impl.reset(ptr);
-	return result;
+	impl.reset(ptr);
+}
+
+void SlateDBFileSystem::InitializeS3(optional_ptr<FileOpener> opener) {
+	auto config = ReadS3InitializationConfig(opener);
+	slatedb_s3_config ffi_config {
+	    config.bucket.c_str(),        config.root.c_str(),   config.endpoint.c_str(),
+	    config.region.c_str(),        config.key_id.c_str(), config.secret.c_str(),
+	    config.session_token.c_str(), config.use_ssl,        config.virtual_host_style,
+	};
+	slatedb_fs *ptr = nullptr;
+	ThrowSlateDBError(slatedb_fs_create_s3(&ffi_config, &ptr), "initialize S3-backed SlateDB filesystem");
+	impl.reset(ptr);
 }
 
 slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> opener) {
@@ -71,35 +91,19 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 		backend = "local";
 	}
 	if (backend == "memory") {
-		slatedb_fs *ptr = nullptr;
-		ThrowSlateDBError(slatedb_fs_create_memory(&ptr), "initialize in-memory SlateDB filesystem");
-		impl.reset(ptr);
-		return impl.get();
-	}
-	if (backend == "local") {
+		InitializeMemory();
+	} else if (backend == "local") {
 		auto local_path = GetOptionalSetting(opener, "duckdb_objfs_root");
 		if (local_path.empty()) {
 			local_path = ".duckdb_objfs";
 		}
-		slatedb_fs *ptr = nullptr;
-		ThrowSlateDBError(slatedb_fs_create_local(local_path.c_str(), &ptr), "initialize local SlateDB filesystem");
-		impl.reset(ptr);
-		return impl.get();
-	}
-	if (backend != "s3") {
+		InitializeLocal(local_path);
+	} else if (backend == "s3") {
+		InitializeS3(opener);
+	} else {
 		throw InvalidConfigurationException("Unsupported duckdb_objfs backend '%s'; expected s3, local, or memory",
 		                                    backend);
 	}
-
-	auto config = ReadS3InitializationConfig(opener);
-	slatedb_s3_config ffi_config {
-	    config.bucket.c_str(),        config.root.c_str(),   config.endpoint.c_str(),
-	    config.region.c_str(),        config.key_id.c_str(), config.secret.c_str(),
-	    config.session_token.c_str(), config.use_ssl,        config.virtual_host_style,
-	};
-	slatedb_fs *ptr = nullptr;
-	ThrowSlateDBError(slatedb_fs_create_s3(&ffi_config, &ptr), "initialize S3-backed SlateDB filesystem");
-	impl.reset(ptr);
 	return impl.get();
 }
 
