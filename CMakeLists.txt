@@ -103,6 +103,23 @@ target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto
 add_dependencies(${EXTENSION_NAME} slatedb_fs_rust)
 add_dependencies(${LOADABLE_EXTENSION_NAME} slatedb_fs_rust)
 
+option(DUCKDB_OBJECT_STORAGE_BUILD_CPP_TESTS
+       "Build duckdb-object-storage C++ unit tests" OFF)
+if(DUCKDB_OBJECT_STORAGE_BUILD_CPP_TESTS)
+  add_executable(duckdb_object_storage_cpp_tests
+                 test/cpp/test_slatedb_file_system.cpp)
+  target_include_directories(duckdb_object_storage_cpp_tests
+                             PRIVATE "${CMAKE_SOURCE_DIR}/third_party/catch")
+  target_link_libraries(duckdb_object_storage_cpp_tests duckdb_static)
+  link_extension_libraries(duckdb_object_storage_cpp_tests "")
+  add_dependencies(duckdb_object_storage_cpp_tests slatedb_fs_rust)
+  add_custom_target(
+    check_duckdb_object_storage_cpp
+    COMMAND $<TARGET_FILE:duckdb_object_storage_cpp_tests>
+    DEPENDS duckdb_object_storage_cpp_tests
+    USES_TERMINAL)
+endif()
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"

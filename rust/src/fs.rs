@@ -12,7 +12,7 @@ use crate::file_handle::SlateFileHandle;
 use crate::flags::FileOpenFlags;
 
 /// URL scheme claimed by this filesystem in DuckDB's virtual filesystem.
-pub const PREFIX: &str = "slatedb://";
+pub const PREFIX: &str = "slatedb:";
 
 /// Name reported to DuckDB via `FileSystem::GetName`.
 pub const NAME: &str = "SlateDBFileSystem";
@@ -462,6 +462,7 @@ mod tests {
             .await
             .expect("filesystem");
         assert!(fs.can_handle("slatedb://bucket/key"));
+        assert!(fs.can_handle("slatedb:/bucket/key"));
         assert!(!fs.can_handle("s3://bucket/key"));
         assert!(!fs.can_handle("/tmp/foo"));
         assert_eq!(fs.name(), NAME);

@@ -27,3 +27,35 @@ statement error
 SELECT * FROM glob('slatedb://dummy/**');
 ----
 dummy implementation
+
+# DuckDB can create, checkpoint, detach, and reopen a database through SlateDB
+statement ok
+ATTACH 'slatedb://integration.db' AS object_db
+
+statement ok
+CREATE TABLE object_db.items(i INTEGER)
+
+statement ok
+INSERT INTO object_db.items VALUES (1), (2)
+
+statement ok
+CHECKPOINT object_db
+
+query I
+SELECT sum(i) FROM object_db.items
+----
+3
+
+statement ok
+DETACH object_db
+
+statement ok
+ATTACH 'slatedb://integration.db' AS object_db
+
+query I
+SELECT sum(i) FROM object_db.items
+----
+3
+
+statement ok
+DETACH object_db

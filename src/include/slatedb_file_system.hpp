@@ -15,13 +15,46 @@ struct SlateDBFsDeleter {
 	}
 };
 
-//! DuckDB filesystem adapter over the Rust SlateDB crate. File I/O is dummy.
+struct SlateDBFileHandleDeleter {
+	void operator()(slatedb_file_handle *ptr) const;
+};
+
+class SlateDBFileHandle : public FileHandle {
+public:
+	SlateDBFileHandle(FileSystem &file_system, string path, FileOpenFlags flags, slatedb_file_handle *handle);
+	~SlateDBFileHandle() override;
+
+	void Close() override;
+
+private:
+	friend class SlateDBFileSystem;
+
+	slatedb_file_handle *GetHandle() const;
+
+	unique_ptr<slatedb_file_handle, SlateDBFileHandleDeleter> impl;
+};
+
+//! DuckDB filesystem adapter over the Rust SlateDB crate.
 class SlateDBFileSystem : public FileSystem {
 public:
 	SlateDBFileSystem();
 
 	unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
 	                                optional_ptr<FileOpener> opener = nullptr) override;
+	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
+	void Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
+	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
+	int64_t Write(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
+	int64_t GetFileSize(FileHandle &handle) override;
+	void Truncate(FileHandle &handle, int64_t new_size) override;
+	void FileSync(FileHandle &handle) override;
+	void Seek(FileHandle &handle, idx_t location) override;
+	idx_t SeekPosition(FileHandle &handle) override;
+	bool CanSeek() override;
+	bool OnDiskFile(FileHandle &handle) override;
+
+	void MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener = nullptr) override;
+	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
 	bool FileExists(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
 	bool DirectoryExists(const string &directory, optional_ptr<FileOpener> opener = nullptr) override;
@@ -30,6 +63,7 @@ public:
 
 	bool CanHandleFile(const string &fpath) override;
 	string PathSeparator(const string &path) override;
+	string CanonicalizePath(const string &path, optional_ptr<FileOpener> opener = nullptr) override;
 	std::string GetName() const override;
 
 private:
