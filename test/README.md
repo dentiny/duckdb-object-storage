@@ -36,6 +36,7 @@ The local backend works without configuration and stores data under
 ATTACH 'duckdb_objfs://database.db' AS object_db;
 ```
 
-Set `duckdb_objfs_local_path` before the first `duckdb_objfs://` access to use
-a different directory. The `memory` backend remains available for tests; set
+Set `duckdb_objfs_root` before the first `duckdb_objfs://` access to use a
+different local directory. For S3, the same setting selects the object prefix
+inside the bucket. The `memory` backend remains available for tests; set
 `duckdb_objfs_backend = 's3'` to use object storage.

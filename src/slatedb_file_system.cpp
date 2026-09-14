@@ -1,12 +1,11 @@
+#include "slatedb_config_utils.hpp"
 #include "slatedb_file_system.hpp"
 #include "slatedb_ffi_utils.hpp"
 #include "slatedb_file_handle.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/file_opener.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/main/secret/secret.hpp"
 
 namespace duckdb {
 
@@ -31,73 +30,6 @@ size_t CheckedSize(int64_t size, const string &operation) {
 		throw InvalidInputException("%s: byte count must not be negative", operation);
 	}
 	return NumericCast<size_t>(size);
-}
-
-struct S3InitializationConfig {
-	string bucket;
-	string root;
-	string endpoint;
-	string region;
-	string key_id;
-	string secret;
-	string session_token;
-	bool use_ssl = true;
-	bool virtual_host_style = false;
-};
-
-string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name) {
-	Value value;
-	if (!FileOpener::TryGetCurrentSetting(opener, name, value) || value.IsNull()) {
-		throw InvalidConfigurationException("Required setting '%s' is not configured", name);
-	}
-	auto result = value.GetValue<string>();
-	if (result.empty()) {
-		throw InvalidConfigurationException("Required setting '%s' must not be empty", name);
-	}
-	return result;
-}
-
-string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name) {
-	Value value;
-	if (!FileOpener::TryGetCurrentSetting(opener, name, value) || value.IsNull()) {
-		return "";
-	}
-	return value.GetValue<string>();
-}
-
-S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener) {
-	if (!opener) {
-		throw InvalidConfigurationException("Cannot initialize object storage without a FileOpener");
-	}
-
-	S3InitializationConfig result;
-	result.bucket = GetRequiredSetting(opener, "duckdb_objfs_bucket");
-	result.root = GetOptionalSetting(opener, "duckdb_objfs_root");
-
-	auto secret_path = "s3://" + result.bucket;
-	if (!result.root.empty()) {
-		auto scope_root = result.root;
-		while (!scope_root.empty() && scope_root[0] == '/') {
-			scope_root.erase(0, 1);
-		}
-		secret_path += "/" + scope_root;
-	}
-	FileOpenerInfo info {secret_path};
-	KeyValueSecretReader secret_reader(*opener, &info, "s3");
-	result.key_id = secret_reader.GetSecretKey("key_id").GetValue<string>();
-	result.secret = secret_reader.GetSecretKey("secret").GetValue<string>();
-	secret_reader.TryGetSecretKey("session_token", result.session_token);
-	secret_reader.TryGetSecretKey("endpoint", result.endpoint);
-	secret_reader.TryGetSecretKey("region", result.region);
-	secret_reader.TryGetSecretKey("use_ssl", result.use_ssl);
-
-	string url_style;
-	secret_reader.TryGetSecretKey("url_style", url_style);
-	if (!url_style.empty() && url_style != "path" && url_style != "vhost") {
-		throw InvalidConfigurationException("S3 secret url_style must be either 'path' or 'vhost'");
-	}
-	result.virtual_host_style = url_style == "vhost";
-	return result;
 }
 
 string LogicalPath(const string &path) {
@@ -148,7 +80,7 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 		return impl.get();
 	}
 
-	auto backend = GetOptionalSetting(opener, "duckdb_objfs_backend");
+	auto backend = slatedb_config::GetOptionalSetting(opener, "duckdb_objfs_backend");
 	if (backend.empty()) {
 		backend = "local";
 	}
@@ -159,7 +91,7 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 		return impl.get();
 	}
 	if (backend == "local") {
-		auto local_path = GetOptionalSetting(opener, "duckdb_objfs_local_path");
+		auto local_path = slatedb_config::GetOptionalSetting(opener, "duckdb_objfs_root");
 		if (local_path.empty()) {
 			local_path = ".duckdb_objfs";
 		}
@@ -173,7 +105,7 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 		                                    backend);
 	}
 
-	auto config = ReadS3InitializationConfig(opener);
+	auto config = slatedb_config::ReadS3InitializationConfig(opener);
 	slatedb_s3_config ffi_config {
 	    config.bucket.c_str(),        config.root.c_str(),   config.endpoint.c_str(),
 	    config.region.c_str(),        config.key_id.c_str(), config.secret.c_str(),

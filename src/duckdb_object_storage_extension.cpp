@@ -13,10 +13,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          Value("local"));
 	config.AddExtensionOption("duckdb_objfs_bucket", "S3 bucket used by the DuckDB object filesystem",
 	                          LogicalType::VARCHAR);
-	config.AddExtensionOption("duckdb_objfs_root", "Object prefix reserved for the DuckDB object filesystem",
-	                          LogicalType::VARCHAR, Value("duckdb_objfs"));
-	config.AddExtensionOption("duckdb_objfs_local_path", "Local directory used by the DuckDB object filesystem",
-	                          LogicalType::VARCHAR, Value(".duckdb_objfs"));
+	config.AddExtensionOption("duckdb_objfs_root", "Local directory or S3 object prefix used by the filesystem",
+	                          LogicalType::VARCHAR);
 	instance.GetFileSystem().RegisterSubSystem(make_uniq<SlateDBFileSystem>());
 }
 
