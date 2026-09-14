@@ -105,11 +105,12 @@ impl DatabaseMetadata {
         Ok(())
     }
 
-    /// Resolves a path to its file ID and metadata, creating both when allowed.
-    pub(crate) async fn get_or_create_file(
+    /// Prepares a path for opening, creating or truncating it when requested.
+    pub(crate) async fn prepare_file_for_open(
         &self,
         path: &str,
         create: bool,
+        truncate_existing: bool,
     ) -> Result<(u64, FileMetadata)> {
         validate_path(path)?;
 
@@ -128,6 +129,18 @@ impl DatabaseMetadata {
                     ))
                 })
                 .and_then(|bytes| FileMetadata::decode_from_bytes(&bytes))?;
+
+            if truncate_existing {
+                let mut chunks = transaction.scan_prefix(chunk_prefix(file_id), ..).await?;
+                while let Some(chunk) = chunks.next().await? {
+                    transaction.delete(chunk.key)?;
+                }
+
+                let metadata = FileMetadata::new();
+                transaction.put(metadata_key(file_id), metadata.encode_to_bytes())?;
+                transaction.commit().await?;
+                return Ok((file_id, metadata));
+            }
 
             return Ok((file_id, metadata));
         }

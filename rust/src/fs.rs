@@ -98,7 +98,7 @@ impl SlateDbFileSystem {
         })?);
         let database_metadata = DatabaseMetadata::new(Arc::clone(&db));
         let (file_id, metadata) = database_metadata
-            .get_or_create_file(path, flags.create)
+            .prepare_file_for_open(path, flags.create, flags.truncate_existing)
             .await?;
 
         SlateFileHandle::new(db, file_id, metadata, flags)
@@ -179,7 +179,7 @@ mod tests {
             .expect("filesystem");
 
         let mut created = fs
-            .open_file("database.db", FileOpenFlags::create())
+            .open_file("database.db", FileOpenFlags::open_or_create())
             .await
             .expect("create file");
         assert_eq!(created.file_id(), 1);
@@ -191,7 +191,7 @@ mod tests {
         drop(created);
 
         let mut other = fs
-            .open_file("other.db", FileOpenFlags::create())
+            .open_file("other.db", FileOpenFlags::open_or_create())
             .await
             .expect("create second file");
         assert_eq!(other.file_id(), 2);
@@ -223,7 +223,7 @@ mod tests {
             .await
             .expect("first open");
         let mut created = first
-            .open_file("database.db", FileOpenFlags::create())
+            .open_file("database.db", FileOpenFlags::open_or_create())
             .await
             .expect("create file");
         created.write(b"persisted").await.expect("write file");
@@ -265,6 +265,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_or_truncate_clears_an_existing_file() {
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
+        let mut original = fs
+            .open_file("recovery.wal", FileOpenFlags::open_or_create())
+            .await
+            .expect("create original");
+        let file_id = original.file_id();
+        original
+            .write(b"stale wal contents")
+            .await
+            .expect("write original");
+        original.close().await.expect("close original");
+        drop(original);
+
+        let mut replaced = fs
+            .open_file("recovery.wal", FileOpenFlags::create_or_truncate())
+            .await
+            .expect("replace file");
+        assert_eq!(replaced.file_id(), file_id);
+        assert_eq!(replaced.file_size(), 0);
+        assert!(fs
+            .db
+            .as_ref()
+            .expect("open database")
+            .scan_prefix(keys::chunk_prefix(file_id), ..)
+            .await
+            .expect("scan old chunks")
+            .next()
+            .await
+            .expect("read old chunk")
+            .is_none());
+        replaced.write(b"new wal").await.expect("write replacement");
+        replaced.close().await.expect("close replacement");
+        drop(replaced);
+
+        let mut reopened = fs
+            .open_file("recovery.wal", FileOpenFlags::read_only())
+            .await
+            .expect("reopen replacement");
+        let mut contents = [0; 7];
+        assert_eq!(
+            reopened
+                .read(&mut contents)
+                .await
+                .expect("read replacement"),
+            contents.len()
+        );
+        assert_eq!(&contents, b"new wal");
+        reopened.close().await.expect("close reopened file");
+        drop(reopened);
+
+        fs.close().await.expect("close");
+    }
+
+    #[tokio::test]
     async fn file_exists_uses_path_mapping_only() {
         let mut fs = SlateDbFileSystem::open_in_memory("test-db")
             .await
@@ -273,7 +330,7 @@ mod tests {
         assert!(!fs.file_exists("database.db").await.expect("missing lookup"));
 
         let mut file = fs
-            .open_file("database.db", FileOpenFlags::create())
+            .open_file("database.db", FileOpenFlags::open_or_create())
             .await
             .expect("create file");
         let file_id = file.file_id();
@@ -305,7 +362,7 @@ mod tests {
             .await
             .expect("filesystem");
         let mut file = fs
-            .open_file("database.db", FileOpenFlags::create())
+            .open_file("database.db", FileOpenFlags::open_or_create())
             .await
             .expect("create file");
         let file_id = file.file_id();
@@ -345,7 +402,7 @@ mod tests {
             .expect("filesystem");
 
         let mut source = fs
-            .open_file("source.db", FileOpenFlags::create())
+            .open_file("source.db", FileOpenFlags::open_or_create())
             .await
             .expect("create source");
         let source_file_id = source.file_id();
@@ -354,7 +411,7 @@ mod tests {
         drop(source);
 
         let mut target = fs
-            .open_file("target.db", FileOpenFlags::create())
+            .open_file("target.db", FileOpenFlags::open_or_create())
             .await
             .expect("create target");
         let replaced_file_id = target.file_id();
