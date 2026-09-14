@@ -1,9 +1,12 @@
+#include "slatedb_config_utils.hpp"
 #include "slatedb_file_system.hpp"
 #include "slatedb_ffi_utils.hpp"
 #include "slatedb_file_handle.hpp"
+#include "slatedb_path_utils.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
 
@@ -39,18 +42,79 @@ void SlateDBFsDeleter::operator()(slatedb_fs *ptr) const {
 }
 
 SlateDBFileSystem::SlateDBFileSystem() {
-	auto *ptr = slatedb_fs_create();
-	if (!ptr) {
-		throw IOException("Failed to initialize SlateDB filesystem");
-	}
+}
+
+unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateInMemory() {
+	auto result = make_uniq<SlateDBFileSystem>();
+	result->InitializeMemory();
+	return result;
+}
+
+unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocal(const string &root) {
+	auto result = make_uniq<SlateDBFileSystem>();
+	result->InitializeLocal(root);
+	return result;
+}
+
+void SlateDBFileSystem::InitializeMemory() {
+	slatedb_fs *ptr = nullptr;
+	ThrowSlateDBError(slatedb_fs_create_memory(&ptr), "initialize in-memory SlateDB filesystem");
 	impl.reset(ptr);
 }
 
-unique_ptr<FileHandle> SlateDBFileSystem::OpenFile(const string &path, FileOpenFlags flags, optional_ptr<FileOpener>) {
+void SlateDBFileSystem::InitializeLocal(const string &root) {
+	slatedb_fs *ptr = nullptr;
+	ThrowSlateDBError(slatedb_fs_create_local(root.c_str(), &ptr), "initialize local SlateDB filesystem");
+	impl.reset(ptr);
+}
+
+void SlateDBFileSystem::InitializeS3(optional_ptr<FileOpener> opener) {
+	auto config = ReadS3InitializationConfig(opener);
+	slatedb_s3_config ffi_config {
+	    config.bucket.c_str(),        config.root.c_str(),   config.endpoint.c_str(),
+	    config.region.c_str(),        config.key_id.c_str(), config.secret.c_str(),
+	    config.session_token.c_str(), config.use_ssl,        config.virtual_host_style,
+	};
+	slatedb_fs *ptr = nullptr;
+	ThrowSlateDBError(slatedb_fs_create_s3(&ffi_config, &ptr), "initialize S3-backed SlateDB filesystem");
+	impl.reset(ptr);
+}
+
+slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> opener) {
+	lock_guard<mutex> guard(initialization_lock);
+	if (impl) {
+		return impl.get();
+	}
+
+	auto backend = GetOptionalSetting(opener, "duckdb_objfs_backend");
+	if (backend.empty()) {
+		backend = "local";
+	}
+	backend = StringUtil::Lower(backend);
+	if (backend == "memory") {
+		InitializeMemory();
+	} else if (backend == "local") {
+		auto local_path = GetOptionalSetting(opener, "duckdb_objfs_root");
+		if (local_path.empty()) {
+			local_path = ".duckdb_objfs";
+		}
+		InitializeLocal(local_path);
+	} else if (backend == "s3") {
+		InitializeS3(opener);
+	} else {
+		throw InvalidConfigurationException("Unsupported duckdb_objfs backend '%s'; expected s3, local, or memory",
+		                                    backend);
+	}
+	return impl.get();
+}
+
+unique_ptr<FileHandle> SlateDBFileSystem::OpenFile(const string &path, FileOpenFlags flags,
+                                                   optional_ptr<FileOpener> opener) {
 	flags.Verify();
 	auto options = ConvertOpenFlags(flags);
 	slatedb_file_handle *handle = nullptr;
-	auto code = slatedb_fs_open_file(impl.get(), path.c_str(), &options, &handle);
+	auto logical_path = GetLogicalPath(path);
+	auto code = slatedb_fs_open_file(GetOrCreateFileSystem(opener), logical_path.c_str(), &options, &handle);
 	if ((code == SLATEDB_FS_ERROR_FILE_NOT_FOUND && flags.ReturnNullIfNotExists()) ||
 	    (code == SLATEDB_FS_ERROR_FILE_ALREADY_EXISTS && flags.ReturnNullIfExists())) {
 		return nullptr;
@@ -134,21 +198,28 @@ bool SlateDBFileSystem::OnDiskFile(FileHandle &) {
 	return false;
 }
 
-void SlateDBFileSystem::MoveFile(const string &source, const string &target, optional_ptr<FileOpener>) {
-	ThrowSlateDBError(slatedb_fs_move_file(impl.get(), source.c_str(), target.c_str()), "move file");
+void SlateDBFileSystem::MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener) {
+	auto logical_source = GetLogicalPath(source);
+	auto logical_target = GetLogicalPath(target);
+	ThrowSlateDBError(
+	    slatedb_fs_move_file(GetOrCreateFileSystem(opener), logical_source.c_str(), logical_target.c_str()),
+	    "move file");
 }
 
-void SlateDBFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener>) {
-	ThrowSlateDBError(slatedb_fs_remove_file(impl.get(), filename.c_str()), "remove file");
+void SlateDBFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
+	auto logical_path = GetLogicalPath(filename);
+	ThrowSlateDBError(slatedb_fs_remove_file(GetOrCreateFileSystem(opener), logical_path.c_str()), "remove file");
 }
 
 vector<OpenFileInfo> SlateDBFileSystem::Glob(const string &, FileOpener *) {
 	throw NotImplementedException("SlateDBFileSystem::Glob is not implemented");
 }
 
-bool SlateDBFileSystem::FileExists(const string &filename, optional_ptr<FileOpener>) {
+bool SlateDBFileSystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
 	int32_t exists = 0;
-	ThrowSlateDBError(slatedb_fs_file_exists(impl.get(), filename.c_str(), &exists), "check if file exists");
+	auto logical_path = GetLogicalPath(filename);
+	ThrowSlateDBError(slatedb_fs_file_exists(GetOrCreateFileSystem(opener), logical_path.c_str(), &exists),
+	                  "check if file exists");
 	return exists != 0;
 }
 
@@ -169,7 +240,7 @@ string SlateDBFileSystem::PathSeparator(const string &) {
 }
 
 string SlateDBFileSystem::CanonicalizePath(const string &path, optional_ptr<FileOpener>) {
-	return path;
+	return StringUtil::Format("duckdb_objfs://%s", GetLogicalPath(path));
 }
 
 std::string SlateDBFileSystem::GetName() const {

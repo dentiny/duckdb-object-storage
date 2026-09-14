@@ -18,6 +18,18 @@ typedef struct slatedb_fs_open_options {
 	int32_t truncate_existing;
 } slatedb_fs_open_options;
 
+typedef struct slatedb_s3_config {
+	const char *bucket;
+	const char *root;
+	const char *endpoint;
+	const char *region;
+	const char *key_id;
+	const char *secret;
+	const char *session_token;
+	int32_t use_ssl;
+	int32_t virtual_host_style;
+} slatedb_s3_config;
+
 typedef enum slatedb_fs_error_code {
 	SLATEDB_FS_ERROR_NONE = 0,
 	SLATEDB_FS_ERROR_METADATA_DECODE = 1,
@@ -29,7 +41,9 @@ typedef enum slatedb_fs_error_code {
 	SLATEDB_FS_ERROR_IO = 7,
 } slatedb_fs_error_code;
 
-slatedb_fs *slatedb_fs_create(void);
+int32_t slatedb_fs_create_memory(slatedb_fs **output);
+int32_t slatedb_fs_create_local(const char *root, slatedb_fs **output);
+int32_t slatedb_fs_create_s3(const slatedb_s3_config *config, slatedb_fs **output);
 void slatedb_fs_destroy(slatedb_fs *fs);
 
 // Operations return zero on success and a stable error code on failure.

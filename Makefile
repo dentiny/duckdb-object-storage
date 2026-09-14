@@ -13,4 +13,7 @@ format-all: format
 	cmake-format -i $(CMAKE_FILES)
 	cargo fmt --manifest-path rust/Cargo.toml
 
-.PHONY: format-all
+test-s3:
+	bash test/s3/run_e2e.sh
+
+.PHONY: format-all test-s3

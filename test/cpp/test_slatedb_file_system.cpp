@@ -1,11 +1,15 @@
 #define CATCH_CONFIG_MAIN
 #include "catch.hpp"
 
+#include "scoped_directory.hpp"
 #include "slatedb_file_handle.hpp"
 #include "slatedb_file_system.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/uuid.hpp"
 
 #include <array>
+#include <cstdlib>
 
 using namespace duckdb;
 
@@ -16,126 +20,182 @@ unique_ptr<FileHandle> CreateFile(SlateDBFileSystem &fs, const string &path) {
 	                   FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE);
 }
 
+enum class TestBackend : uint8_t { MEMORY, LOCAL };
+
+class TestFileSystem {
+public:
+	explicit TestFileSystem(TestBackend backend) : backend(backend) {
+		if (backend == TestBackend::MEMORY) {
+			fs = SlateDBFileSystem::CreateInMemory();
+			return;
+		}
+
+		auto local_fs = FileSystem::CreateLocal();
+		const char *temp_directory = std::getenv("TMPDIR");
+#ifdef _WIN32
+		if (!temp_directory) {
+			temp_directory = std::getenv("TEMP");
+		}
+#endif
+		if (!temp_directory) {
+			temp_directory = "/tmp";
+		}
+		auto local_root = local_fs->JoinPath(
+		    temp_directory, StringUtil::Format("duckdb_objfs_cpp_%s", UUID::ToString(UUID::GenerateRandomUUID())));
+		local_directory = make_uniq<ScopedDirectory>(std::move(local_root));
+		fs = SlateDBFileSystem::CreateLocal(local_directory->GetPath());
+	}
+
+	SlateDBFileSystem *Get() {
+		return fs.get();
+	}
+
+	const char *BackendName() const {
+		return backend == TestBackend::MEMORY ? "memory" : "local";
+	}
+
+private:
+	TestBackend backend;
+	unique_ptr<ScopedDirectory> local_directory;
+	unique_ptr<SlateDBFileSystem> fs;
+};
+
+template <class TEST>
+void RunForEachBackend(TEST test) {
+	for (auto backend : {TestBackend::MEMORY, TestBackend::LOCAL}) {
+		TestFileSystem test_fs(backend);
+		INFO("backend: " << test_fs.BackendName());
+		test(test_fs.Get());
+	}
+}
+
 } // namespace
 
 TEST_CASE("SlateDBFileHandle owns and closes its FFI handle", "[slatedb_fs]") {
-	SlateDBFileSystem fs;
-	auto handle = CreateFile(fs, "duckdb_objfs://close.db");
+	RunForEachBackend([](SlateDBFileSystem *fs) {
+		auto handle = CreateFile(*fs, "duckdb_objfs://close.db");
 
-	REQUIRE(handle);
-	REQUIRE_NOTHROW(handle->Cast<SlateDBFileHandle>());
-	REQUIRE_NOTHROW(handle->Close());
-	REQUIRE_NOTHROW(handle->Close());
+		REQUIRE(handle);
+		REQUIRE_NOTHROW(handle->Cast<SlateDBFileHandle>());
+		REQUIRE_NOTHROW(handle->Close());
+		REQUIRE_NOTHROW(handle->Close());
+	});
 }
 
 TEST_CASE("SlateDBFileSystem maps DuckDB open flags", "[slatedb_fs]") {
-	SlateDBFileSystem fs;
-	const string path = "duckdb_objfs://flags.db";
+	RunForEachBackend([](SlateDBFileSystem *fs) {
+		const string path = "duckdb_objfs://flags.db";
 
-	auto missing = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
-	REQUIRE(!missing);
-	REQUIRE_THROWS_AS(fs.OpenFile(path, FileFlags::FILE_FLAGS_READ), IOException);
+		auto missing = fs->OpenFile(path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
+		REQUIRE(!missing);
+		REQUIRE_THROWS_AS(fs->OpenFile(path, FileFlags::FILE_FLAGS_READ), IOException);
 
-	auto handle = CreateFile(fs, path);
-	std::array<uint8_t, 3> initial {'a', 'b', 'c'};
-	REQUIRE(fs.Write(*handle, initial.data(), initial.size()) == 3);
-	handle->Close();
+		auto handle = CreateFile(*fs, path);
+		std::array<uint8_t, 3> initial {'a', 'b', 'c'};
+		REQUIRE(fs->Write(*handle, initial.data(), initial.size()) == 3);
+		handle->Close();
 
-	handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
-	REQUIRE(fs.GetFileSize(*handle) == 0);
-	handle->Close();
+		handle = fs->OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
+		REQUIRE(fs->GetFileSize(*handle) == 0);
+		handle->Close();
 
-	handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE |
-	                               FileFlags::FILE_FLAGS_APPEND);
-	std::array<uint8_t, 1> suffix {'x'};
-	REQUIRE(fs.Write(*handle, suffix.data(), suffix.size()) == 1);
-	handle->Close();
-	handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-	REQUIRE(fs.GetFileSize(*handle) == 1);
+		handle = fs->OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE |
+		                                FileFlags::FILE_FLAGS_APPEND);
+		std::array<uint8_t, 1> suffix {'x'};
+		REQUIRE(fs->Write(*handle, suffix.data(), suffix.size()) == 1);
+		handle->Close();
+		handle = fs->OpenFile(path, FileFlags::FILE_FLAGS_READ);
+		REQUIRE(fs->GetFileSize(*handle) == 1);
+	});
 }
 
 TEST_CASE("SlateDBFileSystem forwards sequential IO and seeking", "[slatedb_fs]") {
-	SlateDBFileSystem fs;
-	auto handle = CreateFile(fs, "duckdb_objfs://sequential.db");
-	std::array<uint8_t, 4> input {'a', 'b', 'c', 'd'};
+	RunForEachBackend([](SlateDBFileSystem *fs) {
+		auto handle = CreateFile(*fs, "duckdb_objfs://sequential.db");
+		std::array<uint8_t, 4> input {'a', 'b', 'c', 'd'};
 
-	REQUIRE(fs.Write(*handle, input.data(), input.size()) == 4);
-	REQUIRE(fs.GetFileSize(*handle) == 4);
-	REQUIRE(fs.CanSeek());
-	REQUIRE(!fs.OnDiskFile(*handle));
+		REQUIRE(fs->Write(*handle, input.data(), input.size()) == 4);
+		REQUIRE(fs->GetFileSize(*handle) == 4);
+		REQUIRE(fs->CanSeek());
+		REQUIRE(!fs->OnDiskFile(*handle));
 
-	fs.Seek(*handle, 1);
-	REQUIRE(fs.SeekPosition(*handle) == 1);
-	std::array<uint8_t, 2> output {};
-	std::array<uint8_t, 2> expected {'b', 'c'};
-	REQUIRE(fs.Read(*handle, output.data(), output.size()) == 2);
-	REQUIRE(output == expected);
-	REQUIRE(fs.SeekPosition(*handle) == 3);
-	handle->Reset();
-	REQUIRE(fs.SeekPosition(*handle) == 0);
+		fs->Seek(*handle, 1);
+		REQUIRE(fs->SeekPosition(*handle) == 1);
+		std::array<uint8_t, 2> output {};
+		std::array<uint8_t, 2> expected {'b', 'c'};
+		REQUIRE(fs->Read(*handle, output.data(), output.size()) == 2);
+		REQUIRE(output == expected);
+		REQUIRE(fs->SeekPosition(*handle) == 3);
+		handle->Reset();
+		REQUIRE(fs->SeekPosition(*handle) == 0);
+	});
 }
 
 TEST_CASE("SlateDBFileSystem forwards positional IO", "[slatedb_fs]") {
-	SlateDBFileSystem fs;
-	auto handle = CreateFile(fs, "duckdb_objfs://positional.db");
-	std::array<uint8_t, 4> initial {'a', 'b', 'c', 'd'};
-	fs.Write(*handle, initial.data(), initial.size(), 0);
+	RunForEachBackend([](SlateDBFileSystem *fs) {
+		auto handle = CreateFile(*fs, "duckdb_objfs://positional.db");
+		std::array<uint8_t, 4> initial {'a', 'b', 'c', 'd'};
+		fs->Write(*handle, initial.data(), initial.size(), 0);
 
-	std::array<uint8_t, 2> replacement {'X', 'Y'};
-	fs.Write(*handle, replacement.data(), replacement.size(), 1);
-	std::array<uint8_t, 4> output {};
-	std::array<uint8_t, 4> expected {'a', 'X', 'Y', 'd'};
-	fs.Read(*handle, output.data(), output.size(), 0);
+		std::array<uint8_t, 2> replacement {'X', 'Y'};
+		fs->Write(*handle, replacement.data(), replacement.size(), 1);
+		std::array<uint8_t, 4> output {};
+		std::array<uint8_t, 4> expected {'a', 'X', 'Y', 'd'};
+		fs->Read(*handle, output.data(), output.size(), 0);
 
-	REQUIRE(output == expected);
-	REQUIRE_THROWS_AS(fs.Read(*handle, output.data(), output.size(), 2), IOException);
+		REQUIRE(output == expected);
+		REQUIRE_THROWS_AS(fs->Read(*handle, output.data(), output.size(), 2), IOException);
+	});
 }
 
 TEST_CASE("SlateDBFileSystem forwards sync and truncate", "[slatedb_fs]") {
-	SlateDBFileSystem fs;
-	const string path = "duckdb_objfs://truncate.db";
-	auto handle = CreateFile(fs, path);
-	std::array<uint8_t, 4> input {'a', 'b', 'c', 'd'};
+	RunForEachBackend([](SlateDBFileSystem *fs) {
+		const string path = "duckdb_objfs://truncate.db";
+		auto handle = CreateFile(*fs, path);
+		std::array<uint8_t, 4> input {'a', 'b', 'c', 'd'};
 
-	REQUIRE(fs.Write(*handle, input.data(), input.size()) == 4);
-	REQUIRE_NOTHROW(fs.FileSync(*handle));
-	REQUIRE_NOTHROW(fs.Truncate(*handle, 2));
-	REQUIRE(fs.GetFileSize(*handle) == 2);
-	REQUIRE_NOTHROW(fs.FileSync(*handle));
-	handle->Close();
+		REQUIRE(fs->Write(*handle, input.data(), input.size()) == 4);
+		REQUIRE_NOTHROW(fs->FileSync(*handle));
+		REQUIRE_NOTHROW(fs->Truncate(*handle, 2));
+		REQUIRE(fs->GetFileSize(*handle) == 2);
+		REQUIRE_NOTHROW(fs->FileSync(*handle));
+		handle->Close();
 
-	handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-	std::array<uint8_t, 2> output {};
-	std::array<uint8_t, 2> expected {'a', 'b'};
-	fs.Read(*handle, output.data(), output.size(), 0);
-	REQUIRE(output == expected);
+		handle = fs->OpenFile(path, FileFlags::FILE_FLAGS_READ);
+		std::array<uint8_t, 2> output {};
+		std::array<uint8_t, 2> expected {'a', 'b'};
+		fs->Read(*handle, output.data(), output.size(), 0);
+		REQUIRE(output == expected);
+	});
 }
 
 TEST_CASE("SlateDBFileSystem forwards file catalog operations", "[slatedb_fs]") {
-	SlateDBFileSystem fs;
-	const string source = "duckdb_objfs://source.db";
-	const string target = "duckdb_objfs://target.db";
+	RunForEachBackend([](SlateDBFileSystem *fs) {
+		const string source = "duckdb_objfs://source.db";
+		const string target = "duckdb_objfs://target.db";
 
-	REQUIRE(!fs.FileExists(source));
-	CreateFile(fs, source)->Close();
-	REQUIRE(fs.FileExists(source));
+		REQUIRE(!fs->FileExists(source));
+		CreateFile(*fs, source)->Close();
+		REQUIRE(fs->FileExists(source));
 
-	REQUIRE_NOTHROW(fs.MoveFile(source, target));
-	REQUIRE(!fs.FileExists(source));
-	REQUIRE(fs.FileExists(target));
+		REQUIRE_NOTHROW(fs->MoveFile(source, target));
+		REQUIRE(!fs->FileExists(source));
+		REQUIRE(fs->FileExists(target));
 
-	REQUIRE_NOTHROW(fs.RemoveFile(target));
-	REQUIRE(!fs.FileExists(target));
-	REQUIRE_THROWS_AS(fs.RemoveFile(target), IOException);
+		REQUIRE_NOTHROW(fs->RemoveFile(target));
+		REQUIRE(!fs->FileExists(target));
+		REQUIRE_THROWS_AS(fs->RemoveFile(target), IOException);
+	});
 }
 
 TEST_CASE("SlateDBFileSystem converts FFI errors to DuckDB exceptions", "[slatedb_fs]") {
-	SlateDBFileSystem fs;
-	auto writable = CreateFile(fs, "duckdb_objfs://readonly.db");
-	writable->Close();
-	auto read_only = fs.OpenFile("duckdb_objfs://readonly.db", FileFlags::FILE_FLAGS_READ);
-	std::array<uint8_t, 1> byte {'x'};
+	RunForEachBackend([](SlateDBFileSystem *fs) {
+		auto writable = CreateFile(*fs, "duckdb_objfs://readonly.db");
+		writable->Close();
+		auto read_only = fs->OpenFile("duckdb_objfs://readonly.db", FileFlags::FILE_FLAGS_READ);
+		std::array<uint8_t, 1> byte {'x'};
 
-	REQUIRE_THROWS_AS(fs.Write(*read_only, byte.data(), byte.size()), IOException);
-	REQUIRE_THROWS_AS(fs.Truncate(*read_only, 0), IOException);
+		REQUIRE_THROWS_AS(fs->Write(*read_only, byte.data(), byte.size()), IOException);
+		REQUIRE_THROWS_AS(fs->Truncate(*read_only, 0), IOException);
+	});
 }

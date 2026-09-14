@@ -2,25 +2,7 @@
 # description: test duckdb_object_storage extension
 # group: [sql]
 
-# Before we load the extension, this will fail
-statement error
-SELECT duckdb_object_storage('Sam');
-----
-Catalog Error: Scalar Function with name duckdb_object_storage does not exist!
-
-# Require statement will ensure this test is run with this extension loaded
 require duckdb_object_storage
-
-# Confirm the extension works
-query I
-SELECT duckdb_object_storage('Sam');
-----
-DuckdbObjectStorage Sam 🐥
-
-query I
-SELECT duckdb_object_storage_openssl_version('Michael') ILIKE 'DuckdbObjectStorage Michael, my linked OpenSSL version is OpenSSL%';
-----
-true
 
 # SlateDB VFS is registered and claims duckdb_objfs:// paths
 statement error
@@ -28,7 +10,10 @@ SELECT * FROM glob('duckdb_objfs://dummy/**');
 ----
 SlateDBFileSystem::Glob is not implemented
 
-# DuckDB can create, checkpoint, detach, and reopen a database through SlateDB
+# The default backend is local; redirect its root into the isolated test directory.
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_local'
+
 statement ok
 ATTACH 'duckdb_objfs://integration.db' AS object_db
 

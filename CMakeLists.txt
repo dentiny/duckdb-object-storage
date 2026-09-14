@@ -3,12 +3,6 @@ cmake_minimum_required(VERSION 3.5)
 # Set extension name here
 set(TARGET_NAME duckdb_object_storage)
 
-# DuckDB's extension distribution supports vcpkg. As such, dependencies can be
-# added in ./vcpkg.json and then used in cmake with find_package. Feel free to
-# remove or replace with other dependencies. Note that it should also be removed
-# from vcpkg.json to prevent needlessly installing it..
-find_package(OpenSSL REQUIRED)
-
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
@@ -16,8 +10,9 @@ project(${TARGET_NAME})
 include_directories(src/include rust/include)
 
 set(EXTENSION_SOURCES
-    src/duckdb_object_storage_extension.cpp src/slatedb_ffi_utils.cpp
-    src/slatedb_file_handle.cpp src/slatedb_file_system.cpp)
+    src/duckdb_object_storage_extension.cpp src/slatedb_config_utils.cpp
+    src/slatedb_ffi_utils.cpp src/slatedb_file_handle.cpp
+    src/slatedb_file_system.cpp src/slatedb_path_utils.cpp)
 
 # ---------------------------------------------------------------------------
 # SlateDB rust crate (https://slatedb.io/)
@@ -96,19 +91,18 @@ add_custom_target(slatedb_fs_rust DEPENDS "${SLATEDB_FS_LIB}")
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
-# Link OpenSSL in both the static library as the loadable extension
-target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto
-                      "${SLATEDB_FS_LIB}" ${PLATFORM_LIBS})
-target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto
-                      "${SLATEDB_FS_LIB}" ${PLATFORM_LIBS})
+target_link_libraries(${EXTENSION_NAME} "${SLATEDB_FS_LIB}" ${PLATFORM_LIBS})
+target_link_libraries(${LOADABLE_EXTENSION_NAME} "${SLATEDB_FS_LIB}"
+                      ${PLATFORM_LIBS})
 add_dependencies(${EXTENSION_NAME} slatedb_fs_rust)
 add_dependencies(${LOADABLE_EXTENSION_NAME} slatedb_fs_rust)
 
 option(DUCKDB_OBJECT_STORAGE_BUILD_CPP_TESTS
        "Build duckdb-object-storage C++ unit tests" OFF)
 if(DUCKDB_OBJECT_STORAGE_BUILD_CPP_TESTS)
-  add_executable(duckdb_object_storage_cpp_tests
-                 test/cpp/test_slatedb_file_system.cpp)
+  add_executable(
+    duckdb_object_storage_cpp_tests test/cpp/scoped_directory.cpp
+                                    test/cpp/test_slatedb_file_system.cpp)
   target_include_directories(duckdb_object_storage_cpp_tests
                              PRIVATE "${CMAKE_SOURCE_DIR}/third_party/catch")
   target_link_libraries(duckdb_object_storage_cpp_tests duckdb_static)
