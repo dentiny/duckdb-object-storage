@@ -99,8 +99,9 @@ add_dependencies(${LOADABLE_EXTENSION_NAME} slatedb_fs_rust)
 option(DUCKDB_OBJECT_STORAGE_BUILD_CPP_TESTS
        "Build duckdb-object-storage C++ unit tests" OFF)
 if(DUCKDB_OBJECT_STORAGE_BUILD_CPP_TESTS)
-  add_executable(duckdb_object_storage_cpp_tests
-                 test/cpp/test_slatedb_file_system.cpp)
+  add_executable(
+    duckdb_object_storage_cpp_tests test/cpp/scoped_directory.cpp
+                                    test/cpp/test_slatedb_file_system.cpp)
   target_include_directories(duckdb_object_storage_cpp_tests
                              PRIVATE "${CMAKE_SOURCE_DIR}/third_party/catch")
   target_link_libraries(duckdb_object_storage_cpp_tests duckdb_static)

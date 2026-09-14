@@ -134,6 +134,14 @@ unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateInMemory() {
 	return result;
 }
 
+unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocal(const string &root) {
+	auto result = make_uniq<SlateDBFileSystem>();
+	slatedb_fs *ptr = nullptr;
+	ThrowSlateDBError(slatedb_fs_create_local(root.c_str(), &ptr), "initialize local SlateDB filesystem");
+	result->impl.reset(ptr);
+	return result;
+}
+
 slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> opener) {
 	lock_guard<std::mutex> guard(initialization_lock);
 	if (impl) {

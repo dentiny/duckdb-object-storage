@@ -17,6 +17,7 @@ class SlateDBFileSystem : public FileSystem {
 public:
 	SlateDBFileSystem();
 	static unique_ptr<SlateDBFileSystem> CreateInMemory();
+	static unique_ptr<SlateDBFileSystem> CreateLocal(const string &root);
 
 	unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
 	                                optional_ptr<FileOpener> opener = nullptr) override;
