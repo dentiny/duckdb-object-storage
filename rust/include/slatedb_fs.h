@@ -42,6 +42,8 @@ int32_t slatedb_file_pread(const slatedb_file_handle *handle, uint8_t *buffer, s
 int32_t slatedb_file_write(const slatedb_file_handle *handle, const uint8_t *buffer, size_t len,
                            size_t *bytes_written);
 int32_t slatedb_file_pwrite(const slatedb_file_handle *handle, const uint8_t *buffer, size_t len, uint64_t offset);
+int32_t slatedb_file_sync(const slatedb_file_handle *handle);
+int32_t slatedb_file_truncate(const slatedb_file_handle *handle, uint64_t new_size);
 int32_t slatedb_file_close(slatedb_file_handle *handle);
 void slatedb_file_destroy(slatedb_file_handle *handle);
 

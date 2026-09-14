@@ -270,6 +270,22 @@ pub unsafe extern "C" fn slatedb_file_pwrite(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn slatedb_file_sync(handle: *const FfiFileHandle) -> i32 {
+    ffi_result(|| unsafe {
+        with_file_handle(handle, |runtime, file| runtime.block_on(file.sync()))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_truncate(handle: *const FfiFileHandle, new_size: u64) -> i32 {
+    ffi_result(|| unsafe {
+        with_file_handle(handle, |runtime, file| {
+            runtime.block_on(file.truncate(new_size))
+        })
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn slatedb_file_close(handle: *mut FfiFileHandle) -> i32 {
     ffi_result(|| {
         let handle = unsafe { handle.as_mut() }
@@ -377,6 +393,8 @@ mod tests {
             ));
             assert_eq!(bytes_written, 6);
             expect_ok(slatedb_file_pwrite(handle, b"XY".as_ptr(), 2, 2));
+            expect_ok(slatedb_file_truncate(handle, 4));
+            expect_ok(slatedb_file_sync(handle));
             expect_ok(slatedb_file_close(handle));
             slatedb_file_destroy(handle);
 
@@ -389,7 +407,7 @@ mod tests {
                 &options,
                 &mut handle,
             ));
-            let mut contents = [0; 6];
+            let mut contents = [0; 4];
             let mut bytes_read = 0;
             expect_ok(slatedb_file_read(
                 handle,
@@ -398,7 +416,7 @@ mod tests {
                 &mut bytes_read,
             ));
             assert_eq!(bytes_read, contents.len());
-            assert_eq!(&contents, b"abXYef");
+            assert_eq!(&contents, b"abXY");
             let mut middle = [0; 2];
             expect_ok(slatedb_file_pread(
                 handle,
