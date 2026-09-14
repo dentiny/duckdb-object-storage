@@ -29,13 +29,13 @@ scope-matching S3 secret and are never placed in extension settings.
 
 ## Local filesystem backend
 
-Set the backend and a storage directory before the first `duckdb_objfs://`
-access:
+The local backend works without configuration and stores data under
+`.duckdb_objfs` in the current working directory:
 
 ```sql
-SET duckdb_objfs_backend = 'local';
-SET duckdb_objfs_local_path = '/var/lib/duckdb-objfs';
 ATTACH 'duckdb_objfs://database.db' AS object_db;
 ```
 
-The `memory` backend remains available for tests. The default backend is `s3`.
+Set `duckdb_objfs_local_path` before the first `duckdb_objfs://` access to use
+a different directory. The `memory` backend remains available for tests; set
+`duckdb_objfs_backend = 's3'` to use object storage.

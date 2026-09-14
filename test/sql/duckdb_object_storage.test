@@ -10,16 +10,7 @@ SELECT * FROM glob('duckdb_objfs://dummy/**');
 ----
 SlateDBFileSystem::Glob is not implemented
 
-# Production initialization requires explicit object-storage configuration.
-statement error
-ATTACH 'duckdb_objfs://integration.db' AS object_db
-----
-Required setting 'duckdb_objfs_bucket' is not configured
-
-# Local integration coverage persists SlateDB data under the test directory.
-statement ok
-SET duckdb_objfs_backend = 'local'
-
+# The default backend is local; redirect its root into the isolated test directory.
 statement ok
 SET duckdb_objfs_local_path = '__TEST_DIR__/duckdb_objfs_local'
 

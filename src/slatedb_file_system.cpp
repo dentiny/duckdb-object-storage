@@ -142,7 +142,7 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 
 	auto backend = GetOptionalSetting(opener, "duckdb_objfs_backend");
 	if (backend.empty()) {
-		backend = "s3";
+		backend = "local";
 	}
 	if (backend == "memory") {
 		slatedb_fs *ptr = nullptr;
@@ -151,7 +151,10 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 		return impl.get();
 	}
 	if (backend == "local") {
-		auto local_path = GetRequiredSetting(opener, "duckdb_objfs_local_path");
+		auto local_path = GetOptionalSetting(opener, "duckdb_objfs_local_path");
+		if (local_path.empty()) {
+			local_path = ".duckdb_objfs";
+		}
 		slatedb_fs *ptr = nullptr;
 		ThrowSlateDBError(slatedb_fs_create_local(local_path.c_str(), &ptr), "initialize local SlateDB filesystem");
 		impl.reset(ptr);
