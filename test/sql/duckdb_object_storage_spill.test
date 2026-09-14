@@ -1,0 +1,41 @@
+# name: test/sql/duckdb_object_storage_spill.test
+# description: Verify DuckDB spill files stay on the local filesystem
+# group: [sql]
+
+require duckdb_object_storage
+
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_local'
+
+# Simulate the default temp path derived from an object-storage database.
+statement ok
+SET temp_directory = 'duckdb_objfs://spill.db.tmp'
+
+statement ok
+ATTACH 'duckdb_objfs://spill.db' AS object_db
+
+query T
+SELECT starts_with(current_setting('temp_directory'), 'duckdb_objfs:')
+----
+false
+
+statement ok
+SET memory_limit = '4MB'
+
+statement ok
+CREATE TEMP TABLE spilled_data AS SELECT random() AS value FROM range(1000000)
+
+query II
+SELECT count(*) > 0, count(*) FILTER (starts_with(path, 'duckdb_objfs:'))
+FROM duckdb_temporary_files()
+----
+true	0
+
+query T
+SELECT count(*) > 0
+FROM glob(current_setting('temp_directory') || '/duckdb_temp_*')
+----
+true
+
+statement ok
+DETACH object_db

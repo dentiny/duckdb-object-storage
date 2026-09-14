@@ -5,8 +5,12 @@
 #include "slatedb_path_utils.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_opener.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/uuid.hpp"
+#include "duckdb/main/database.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 namespace duckdb {
 
@@ -80,8 +84,27 @@ void SlateDBFileSystem::InitializeS3(optional_ptr<FileOpener> opener) {
 	impl.reset(ptr);
 }
 
+void SlateDBFileSystem::EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> opener) {
+	auto database = FileOpener::TryGetDatabase(opener);
+	if (!database) {
+		return;
+	}
+
+	auto &buffer_manager = database->GetBufferManager();
+	if (!CanHandleFile(buffer_manager.GetTemporaryDirectory())) {
+		return;
+	}
+
+	auto &local_fs = FileSystem::GetLocal(*database);
+	auto local_directory =
+	    local_fs.JoinPath(GetDefaultTemporaryDirectory(),
+	                      StringUtil::Format("duckdb_objfs-%s.tmp", UUID::ToString(UUID::GenerateRandomUUID())));
+	buffer_manager.SetTemporaryDirectory(local_directory);
+}
+
 slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> opener) {
 	lock_guard<mutex> guard(initialization_lock);
+	EnsureTemporaryFilesStayLocal(opener);
 	if (impl) {
 		return impl.get();
 	}
