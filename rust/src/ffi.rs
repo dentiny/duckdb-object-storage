@@ -100,6 +100,10 @@ unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlag
     })
 }
 
+unsafe fn require_output<'a, T>(output: *mut T, name: &str) -> Result<&'a mut T> {
+    unsafe { output.as_mut() }.ok_or_else(|| invalid_argument(format!("{name} must not be null")))
+}
+
 unsafe fn with_file_handle<T>(
     handle: *const FfiFileHandle,
     operation: impl FnOnce(&Runtime, &mut SlateFileHandle) -> Result<T>,
@@ -177,8 +181,7 @@ pub unsafe extern "C" fn slatedb_fs_open_file(
     output: *mut *mut FfiFileHandle,
 ) -> i32 {
     ffi_result(|| {
-        let output = unsafe { output.as_mut() }
-            .ok_or_else(|| invalid_argument("file handle output must not be null"))?;
+        let output = unsafe { require_output(output, "file handle output")? };
         *output = ptr::null_mut();
         let fs = unsafe { require_fs(fs)? };
         let path = unsafe { require_path(path, "file path")? };
@@ -189,6 +192,48 @@ pub unsafe extern "C" fn slatedb_fs_open_file(
             handle: Mutex::new(Some(handle)),
         }));
         Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_fs_file_exists(
+    fs: *const FfiFileSystem,
+    path: *const c_char,
+    output: *mut i32,
+) -> i32 {
+    ffi_result(|| {
+        let output = unsafe { require_output(output, "file exists output")? };
+        *output = 0;
+        let fs = unsafe { require_fs(fs)? };
+        let path = unsafe { require_path(path, "file path")? };
+        *output = i32::from(fs.runtime.block_on(fs.fs.file_exists(path))?);
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_fs_remove_file(
+    fs: *const FfiFileSystem,
+    path: *const c_char,
+) -> i32 {
+    ffi_result(|| {
+        let fs = unsafe { require_fs(fs)? };
+        let path = unsafe { require_path(path, "file path")? };
+        fs.runtime.block_on(fs.fs.remove_file(path))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_fs_move_file(
+    fs: *const FfiFileSystem,
+    source: *const c_char,
+    target: *const c_char,
+) -> i32 {
+    ffi_result(|| {
+        let fs = unsafe { require_fs(fs)? };
+        let source = unsafe { require_path(source, "source path")? };
+        let target = unsafe { require_path(target, "target path")? };
+        fs.runtime.block_on(fs.fs.move_file(source, target))
     })
 }
 
@@ -286,6 +331,42 @@ pub unsafe extern "C" fn slatedb_file_truncate(handle: *const FfiFileHandle, new
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn slatedb_file_seek(handle: *const FfiFileHandle, position: u64) -> i32 {
+    ffi_result(|| unsafe {
+        with_file_handle(handle, |_, file| {
+            file.seek(position);
+            Ok(())
+        })
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_get_position(
+    handle: *const FfiFileHandle,
+    output: *mut u64,
+) -> i32 {
+    ffi_result(|| {
+        let output = unsafe { require_output(output, "file position output")? };
+        *output = 0;
+        *output = unsafe { with_file_handle(handle, |_, file| Ok(file.seek_position()))? };
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_get_size(
+    handle: *const FfiFileHandle,
+    output: *mut u64,
+) -> i32 {
+    ffi_result(|| {
+        let output = unsafe { require_output(output, "file size output")? };
+        *output = 0;
+        *output = unsafe { with_file_handle(handle, |_, file| Ok(file.file_size()))? };
+        Ok(())
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn slatedb_file_close(handle: *mut FfiFileHandle) -> i32 {
     ffi_result(|| {
         let handle = unsafe { handle.as_mut() }
@@ -350,6 +431,26 @@ pub extern "C" fn slatedb_fs_dummy_error() -> *const c_char {
 mod tests {
     use super::*;
 
+    fn read_write_options() -> FfiOpenOptions {
+        FfiOpenOptions {
+            read: 1,
+            write: 1,
+            create: 1,
+            append: 0,
+            truncate_existing: 0,
+        }
+    }
+
+    fn read_only_options() -> FfiOpenOptions {
+        FfiOpenOptions {
+            read: 1,
+            write: 0,
+            create: 0,
+            append: 0,
+            truncate_existing: 0,
+        }
+    }
+
     unsafe fn expect_ok(code: i32) {
         if code != 0 {
             let message = unsafe { CStr::from_ptr(slatedb_fs_last_error_message()) };
@@ -360,29 +461,67 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ffi_file_io_lifecycle() {
+    unsafe fn create_fs() -> *mut FfiFileSystem {
+        let fs = slatedb_fs_create();
+        assert!(!fs.is_null());
+        fs
+    }
+
+    unsafe fn open_file(
+        fs: *const FfiFileSystem,
+        path: &CStr,
+        options: &FfiOpenOptions,
+    ) -> *mut FfiFileHandle {
+        let mut handle = ptr::null_mut();
         unsafe {
-            let fs = slatedb_fs_create();
-            assert!(!fs.is_null());
-            let path = CString::new("database.db").unwrap();
-
-            let mut options = FfiOpenOptions {
-                read: 1,
-                write: 1,
-                create: 1,
-                append: 0,
-                truncate_existing: 0,
-            };
-
-            let mut handle = ptr::null_mut();
             expect_ok(slatedb_fs_open_file(
                 fs,
                 path.as_ptr(),
-                &options,
+                options,
                 &mut handle,
             ));
-            assert!(!handle.is_null());
+        }
+        assert!(!handle.is_null());
+        handle
+    }
+
+    unsafe fn file_exists(fs: *const FfiFileSystem, path: &CStr) -> bool {
+        let mut exists = 0;
+        unsafe {
+            expect_ok(slatedb_fs_file_exists(fs, path.as_ptr(), &mut exists));
+        }
+        exists != 0
+    }
+
+    #[test]
+    fn ffi_open_close_lifecycle() {
+        unsafe {
+            let fs = create_fs();
+            let path = CString::new("database.db").unwrap();
+            let handle = open_file(fs, &path, &read_write_options());
+            expect_ok(slatedb_file_close(handle));
+            slatedb_file_destroy(handle);
+
+            let mut missing_handle = ptr::null_mut();
+            let missing = CString::new("missing.db").unwrap();
+            let error = slatedb_fs_open_file(
+                fs,
+                missing.as_ptr(),
+                &read_only_options(),
+                &mut missing_handle,
+            );
+            assert_eq!(error, crate::ErrorCode::FileNotFound as i32);
+            assert!(missing_handle.is_null());
+            slatedb_fs_destroy(fs);
+        }
+    }
+
+    #[test]
+    fn ffi_read_write_sync_and_truncate() {
+        unsafe {
+            let fs = create_fs();
+            let path = CString::new("database.db").unwrap();
+            let handle = open_file(fs, &path, &read_write_options());
 
             let mut bytes_written = 0;
             expect_ok(slatedb_file_write(
@@ -395,18 +534,12 @@ mod tests {
             expect_ok(slatedb_file_pwrite(handle, b"XY".as_ptr(), 2, 2));
             expect_ok(slatedb_file_truncate(handle, 4));
             expect_ok(slatedb_file_sync(handle));
-            expect_ok(slatedb_file_close(handle));
+            let mut size = 0;
+            expect_ok(slatedb_file_get_size(handle, &mut size));
+            assert_eq!(size, 4);
             slatedb_file_destroy(handle);
 
-            options.read = 1;
-            options.write = 0;
-            options.create = 0;
-            expect_ok(slatedb_fs_open_file(
-                fs,
-                path.as_ptr(),
-                &options,
-                &mut handle,
-            ));
+            let handle = open_file(fs, &path, &read_only_options());
             let mut contents = [0; 4];
             let mut bytes_read = 0;
             expect_ok(slatedb_file_read(
@@ -427,11 +560,61 @@ mod tests {
             ));
             assert_eq!(&middle, b"XY");
             slatedb_file_destroy(handle);
+            slatedb_fs_destroy(fs);
+        }
+    }
 
-            let missing = CString::new("missing.db").unwrap();
-            let missing_error = slatedb_fs_open_file(fs, missing.as_ptr(), &options, &mut handle);
-            assert_eq!(missing_error, crate::ErrorCode::FileNotFound as i32);
-            assert!(handle.is_null());
+    #[test]
+    fn ffi_seek_and_get_position() {
+        unsafe {
+            let fs = create_fs();
+            let path = CString::new("database.db").unwrap();
+            let handle = open_file(fs, &path, &read_write_options());
+
+            let mut bytes_written = 0;
+            expect_ok(slatedb_file_write(
+                handle,
+                b"abc".as_ptr(),
+                3,
+                &mut bytes_written,
+            ));
+            expect_ok(slatedb_file_seek(handle, 1));
+            let mut position = 0;
+            expect_ok(slatedb_file_get_position(handle, &mut position));
+            assert_eq!(position, 1);
+
+            let mut byte = [0];
+            let mut bytes_read = 0;
+            expect_ok(slatedb_file_read(
+                handle,
+                byte.as_mut_ptr(),
+                byte.len(),
+                &mut bytes_read,
+            ));
+            assert_eq!(&byte, b"b");
+            expect_ok(slatedb_file_get_position(handle, &mut position));
+            assert_eq!(position, 2);
+
+            slatedb_file_destroy(handle);
+            slatedb_fs_destroy(fs);
+        }
+    }
+
+    #[test]
+    fn ffi_file_exists_move_and_remove() {
+        unsafe {
+            let fs = create_fs();
+            let source = CString::new("source.db").unwrap();
+            let target = CString::new("target.db").unwrap();
+            slatedb_file_destroy(open_file(fs, &source, &read_write_options()));
+
+            assert!(file_exists(fs, &source));
+            assert!(!file_exists(fs, &target));
+            expect_ok(slatedb_fs_move_file(fs, source.as_ptr(), target.as_ptr()));
+            assert!(!file_exists(fs, &source));
+            assert!(file_exists(fs, &target));
+            expect_ok(slatedb_fs_remove_file(fs, target.as_ptr()));
+            assert!(!file_exists(fs, &target));
 
             slatedb_fs_destroy(fs);
         }
