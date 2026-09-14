@@ -1,10 +1,10 @@
 #pragma once
 
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "slatedb_fs.h"
 
 #include <memory>
-#include <mutex>
 
 namespace duckdb {
 
@@ -49,7 +49,7 @@ public:
 private:
 	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener);
 
-	std::mutex initialization_lock;
+	mutex initialization_lock;
 	unique_ptr<slatedb_fs, SlateDBFsDeleter> impl;
 };
 

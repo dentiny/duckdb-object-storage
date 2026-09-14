@@ -143,7 +143,7 @@ unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocal(const string &root)
 }
 
 slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> opener) {
-	lock_guard<std::mutex> guard(initialization_lock);
+	lock_guard<mutex> guard(initialization_lock);
 	if (impl) {
 		return impl.get();
 	}
