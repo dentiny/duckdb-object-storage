@@ -90,6 +90,7 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 	if (backend.empty()) {
 		backend = "local";
 	}
+	backend = StringUtil::Lower(backend);
 	if (backend == "memory") {
 		InitializeMemory();
 	} else if (backend == "local") {
@@ -112,7 +113,7 @@ unique_ptr<FileHandle> SlateDBFileSystem::OpenFile(const string &path, FileOpenF
 	flags.Verify();
 	auto options = ConvertOpenFlags(flags);
 	slatedb_file_handle *handle = nullptr;
-	auto logical_path = LogicalPath(path);
+	auto logical_path = GetLogicalPath(path);
 	auto code = slatedb_fs_open_file(GetOrCreateFileSystem(opener), logical_path.c_str(), &options, &handle);
 	if ((code == SLATEDB_FS_ERROR_FILE_NOT_FOUND && flags.ReturnNullIfNotExists()) ||
 	    (code == SLATEDB_FS_ERROR_FILE_ALREADY_EXISTS && flags.ReturnNullIfExists())) {
@@ -198,15 +199,15 @@ bool SlateDBFileSystem::OnDiskFile(FileHandle &) {
 }
 
 void SlateDBFileSystem::MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener) {
-	auto logical_source = LogicalPath(source);
-	auto logical_target = LogicalPath(target);
+	auto logical_source = GetLogicalPath(source);
+	auto logical_target = GetLogicalPath(target);
 	ThrowSlateDBError(
 	    slatedb_fs_move_file(GetOrCreateFileSystem(opener), logical_source.c_str(), logical_target.c_str()),
 	    "move file");
 }
 
 void SlateDBFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
-	auto logical_path = LogicalPath(filename);
+	auto logical_path = GetLogicalPath(filename);
 	ThrowSlateDBError(slatedb_fs_remove_file(GetOrCreateFileSystem(opener), logical_path.c_str()), "remove file");
 }
 
@@ -216,7 +217,7 @@ vector<OpenFileInfo> SlateDBFileSystem::Glob(const string &, FileOpener *) {
 
 bool SlateDBFileSystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
 	int32_t exists = 0;
-	auto logical_path = LogicalPath(filename);
+	auto logical_path = GetLogicalPath(filename);
 	ThrowSlateDBError(slatedb_fs_file_exists(GetOrCreateFileSystem(opener), logical_path.c_str(), &exists),
 	                  "check if file exists");
 	return exists != 0;
@@ -239,7 +240,7 @@ string SlateDBFileSystem::PathSeparator(const string &) {
 }
 
 string SlateDBFileSystem::CanonicalizePath(const string &path, optional_ptr<FileOpener>) {
-	return StringUtil::Format("duckdb_objfs://%s", LogicalPath(path));
+	return StringUtil::Format("duckdb_objfs://%s", GetLogicalPath(path));
 }
 
 std::string SlateDBFileSystem::GetName() const {

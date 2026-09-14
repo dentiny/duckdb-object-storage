@@ -12,6 +12,6 @@ namespace duckdb {
 //! Examples:
 //!   duckdb_objfs://database.db     -> database.db
 //!   duckdb_objfs:/dir/database.db  -> dir/database.db
-string LogicalPath(const string &path);
+string GetLogicalPath(const string &path);
 
 } // namespace duckdb

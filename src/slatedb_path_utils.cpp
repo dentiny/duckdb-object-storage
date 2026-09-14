@@ -5,7 +5,7 @@
 
 namespace duckdb {
 
-string LogicalPath(const string &path) {
+string GetLogicalPath(const string &path) {
 	const string prefix = "duckdb_objfs:";
 	if (!StringUtil::StartsWith(path, prefix)) {
 		throw InvalidInputException("Object filesystem path must start with '%s'", prefix);
