@@ -95,7 +95,10 @@ void SlateDBFileSystem::EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> o
 		return;
 	}
 
-	auto local_directory = StringUtil::Format(".duckdb_objfs-%s.tmp", UUID::ToString(UUID::GenerateRandomUUID()));
+	auto &local_fs = FileSystem::GetLocal(*database);
+	auto local_directory =
+	    local_fs.JoinPath(GetDefaultTemporaryDirectory(),
+	                      StringUtil::Format("duckdb_objfs-%s.tmp", UUID::ToString(UUID::GenerateRandomUUID())));
 	buffer_manager.SetTemporaryDirectory(local_directory);
 }
 

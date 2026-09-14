@@ -14,4 +14,7 @@ namespace duckdb {
 //!   duckdb_objfs:/dir/database.db  -> dir/database.db
 string GetLogicalPath(const string &path);
 
+//! Returns the platform's default machine-local temporary directory.
+string GetDefaultTemporaryDirectory();
+
 } // namespace duckdb

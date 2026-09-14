@@ -98,9 +98,9 @@ object storage:
 Machine-local runtime files do not belong in object storage. DuckDB spill
 files (`duckdb_temp_storage_*.tmp` and `duckdb_temp_block-*.block`) continue to
 use its `temp_directory`. If that setting points at a `duckdb_objfs://` path,
-the extension replaces it with a unique local directory before opening the
-object database. Set `temp_directory` to an explicit local path before
-`ATTACH` to control its location.
+the extension replaces it with a unique directory under the platform's local
+temporary directory before opening the object database. Set `temp_directory`
+to an explicit local path before `ATTACH` to control its location.
 
 Other files are routed by their own path. Extension binaries, persisted
 secrets, logs, and local `COPY` outputs stay local unless their path explicitly
