@@ -1,5 +1,5 @@
-INSTALL httpfs;
-LOAD httpfs;
+FORCE INSTALL cache_httpfs FROM community;
+LOAD cache_httpfs;
 LOAD duckdb_object_storage;
 
 CREATE OR REPLACE SECRET duckdb_objfs_s3 (
