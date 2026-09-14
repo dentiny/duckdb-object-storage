@@ -14,6 +14,8 @@ pub struct FileOpenFlags {
     pub create: bool,
     /// Write to the end of the file.
     pub append: bool,
+    /// Create the file if missing, or clear it before opening if it exists.
+    pub truncate_existing: bool,
 }
 
 impl FileOpenFlags {
@@ -24,6 +26,7 @@ impl FileOpenFlags {
             write: false,
             create: false,
             append: false,
+            truncate_existing: false,
         }
     }
 
@@ -34,16 +37,29 @@ impl FileOpenFlags {
             write: true,
             create: false,
             append: false,
+            truncate_existing: false,
         }
     }
 
     /// Opens a file for reading and writing, creating it if it is not there.
-    pub fn create() -> Self {
+    pub fn open_or_create() -> Self {
         Self {
             read: true,
             write: true,
             create: true,
             append: false,
+            truncate_existing: false,
+        }
+    }
+
+    /// Creates a file, replacing its contents if it already exists.
+    pub fn create_or_truncate() -> Self {
+        Self {
+            read: false,
+            write: true,
+            create: true,
+            append: false,
+            truncate_existing: true,
         }
     }
 
@@ -54,6 +70,7 @@ impl FileOpenFlags {
             write: true,
             create: true,
             append: true,
+            truncate_existing: false,
         }
     }
 
@@ -65,6 +82,8 @@ impl FileOpenFlags {
             "create requires write access"
         } else if self.append && !self.write {
             "append requires write access"
+        } else if self.truncate_existing && !self.create {
+            "truncate existing requires create"
         } else {
             return Ok(());
         };

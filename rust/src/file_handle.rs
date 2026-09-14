@@ -549,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn sequential_io_tracks_position() {
         let fixture = TestDb::new().await;
-        let mut handle = fixture.handle(1, FileOpenFlags::create());
+        let mut handle = fixture.handle(1, FileOpenFlags::open_or_create());
 
         assert_eq!(handle.write(b"abcdef").await.unwrap(), 6);
         assert_eq!(handle.seek_position(), 6);
@@ -569,7 +569,7 @@ mod tests {
     #[tokio::test]
     async fn writes_persist_across_chunks_and_reopen() {
         let fixture = TestDb::new().await;
-        let mut handle = fixture.handle(2, FileOpenFlags::create());
+        let mut handle = fixture.handle(2, FileOpenFlags::open_or_create());
 
         handle.pwrite(b"hello", 0).await.unwrap();
         handle.pwrite(b"xyz", SMALL_CHUNK - 1).await.unwrap();
@@ -592,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn append_writes_at_end_after_reopen() {
         let fixture = TestDb::new().await;
-        let mut writer = fixture.handle(6, FileOpenFlags::create());
+        let mut writer = fixture.handle(6, FileOpenFlags::open_or_create());
         writer.write(b"abc").await.unwrap();
         writer.close().await.unwrap();
         drop(writer);
@@ -617,7 +617,7 @@ mod tests {
     #[tokio::test]
     async fn truncate_then_sparse_write_reads_as_zero() {
         let fixture = TestDb::new().await;
-        let mut handle = fixture.handle(3, FileOpenFlags::create());
+        let mut handle = fixture.handle(3, FileOpenFlags::open_or_create());
 
         handle.pwrite(b"abcdefghij", 0).await.unwrap();
         handle.sync().await.unwrap();
@@ -638,7 +638,7 @@ mod tests {
     #[tokio::test]
     async fn failed_truncate_preserves_unflushed_writes() {
         let fixture = TestDb::new().await;
-        let mut handle = fixture.handle(5, FileOpenFlags::create());
+        let mut handle = fixture.handle(5, FileOpenFlags::open_or_create());
 
         handle.pwrite(b"abcdefghij", 0).await.unwrap();
         assert_eq!(handle.file_size(), 10);
@@ -663,7 +663,7 @@ mod tests {
     #[tokio::test]
     async fn read_only_handle_rejects_writes() {
         let fixture = TestDb::new().await;
-        let mut writer = fixture.handle(4, FileOpenFlags::create());
+        let mut writer = fixture.handle(4, FileOpenFlags::open_or_create());
         writer.pwrite(b"abc", 0).await.unwrap();
         writer.close().await.unwrap();
         drop(writer);

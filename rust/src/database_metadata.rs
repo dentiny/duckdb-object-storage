@@ -110,6 +110,7 @@ impl DatabaseMetadata {
         &self,
         path: &str,
         create: bool,
+        truncate_existing: bool,
     ) -> Result<(u64, FileMetadata)> {
         validate_path(path)?;
 
@@ -128,6 +129,18 @@ impl DatabaseMetadata {
                     ))
                 })
                 .and_then(|bytes| FileMetadata::decode_from_bytes(&bytes))?;
+
+            if truncate_existing {
+                let mut chunks = transaction.scan_prefix(chunk_prefix(file_id), ..).await?;
+                while let Some(chunk) = chunks.next().await? {
+                    transaction.delete(chunk.key)?;
+                }
+
+                let metadata = FileMetadata::new();
+                transaction.put(metadata_key(file_id), metadata.encode_to_bytes())?;
+                transaction.commit().await?;
+                return Ok((file_id, metadata));
+            }
 
             return Ok((file_id, metadata));
         }
