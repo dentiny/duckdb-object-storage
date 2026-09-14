@@ -1,12 +1,29 @@
-use std::ffi::{c_char, CStr};
+use std::any::Any;
+use std::cell::{Cell, RefCell};
+use std::ffi::{c_char, CStr, CString};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Runtime;
 
+use crate::error::{Error, Result};
+use crate::error_struct::{ErrorStatus, ErrorStruct};
+use crate::file_handle::{FileHandle, SlateFileHandle};
+use crate::flags::FileOpenFlags;
 use crate::fs::SlateDbFileSystem;
 
 const DATABASE_PATH: &str = "duckdb-object-storage";
+
+#[repr(C)]
+pub struct FfiOpenOptions {
+    struct_size: usize,
+    read: i32,
+    write: i32,
+    create: i32,
+    append: i32,
+    truncate_existing: i32,
+}
 
 /// Synchronous FFI context owning the one async runtime used by this
 /// filesystem instance.
@@ -15,31 +32,185 @@ pub struct FfiFileSystem {
     fs: SlateDbFileSystem,
 }
 
+pub struct FfiFileHandle {
+    runtime: Arc<Runtime>,
+    handle: Mutex<Option<SlateFileHandle>>,
+}
+
+thread_local! {
+    static LAST_ERROR_MESSAGE: RefCell<CString> =
+        RefCell::new(CString::new("").expect("empty string has no NUL"));
+    static LAST_ERROR_RETRYABLE: Cell<i32> = const { Cell::new(0) };
+}
+
+fn invalid_argument(message: impl Into<String>) -> Error {
+    Error::InvalidArgument(ErrorStruct::new(message.into(), ErrorStatus::Permanent))
+}
+
+fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown Rust panic".to_string()
+    }
+}
+
+fn store_error(error: Error) -> i32 {
+    let code = error.code() as i32;
+    let retryable = i32::from(error.status() == ErrorStatus::Temporary);
+    let message = CString::new(error.to_string().replace('\0', "\\0"))
+        .expect("escaped error message cannot contain NUL");
+    LAST_ERROR_MESSAGE.with(|slot| *slot.borrow_mut() = message);
+    LAST_ERROR_RETRYABLE.with(|slot| slot.set(retryable));
+    code
+}
+
+fn ffi_result(operation: impl FnOnce() -> Result<()>) -> i32 {
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => store_error(error),
+        Err(payload) => store_error(invalid_argument(format!(
+            "Rust panic while handling FFI call: {}",
+            panic_message(payload)
+        ))),
+    }
+}
+
+unsafe fn require_fs<'a>(fs: *const FfiFileSystem) -> Result<&'a FfiFileSystem> {
+    unsafe { fs.as_ref() }.ok_or_else(|| invalid_argument("filesystem pointer must not be null"))
+}
+
+unsafe fn require_path<'a>(path: *const c_char, name: &str) -> Result<&'a str> {
+    if path.is_null() {
+        return Err(invalid_argument(format!("{name} must not be null")));
+    }
+    unsafe { CStr::from_ptr(path) }
+        .to_str()
+        .map_err(|_| invalid_argument(format!("{name} must be valid UTF-8")))
+}
+
+unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlags> {
+    let options = unsafe { options.as_ref() }
+        .ok_or_else(|| invalid_argument("open options must not be null"))?;
+    if options.struct_size < std::mem::size_of::<FfiOpenOptions>() {
+        return Err(invalid_argument("open options struct is too small"));
+    }
+    Ok(FileOpenFlags {
+        read: options.read != 0,
+        write: options.write != 0,
+        create: options.create != 0,
+        append: options.append != 0,
+        truncate_existing: options.truncate_existing != 0,
+    })
+}
+
 #[no_mangle]
 pub extern "C" fn slatedb_fs_create() -> *mut FfiFileSystem {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        // TODO(hjiang): Tune the worker count.
-        .worker_threads(1)
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => Arc::new(runtime),
-        Err(_) => return ptr::null_mut(),
-    };
-    let fs = match runtime.block_on(SlateDbFileSystem::open_in_memory(DATABASE_PATH)) {
-        Ok(fs) => fs,
-        Err(_) => return ptr::null_mut(),
-    };
-
-    Box::into_raw(Box::new(FfiFileSystem { runtime, fs }))
+    catch_unwind(AssertUnwindSafe(|| {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            // TODO(hjiang): Tune the worker count.
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .ok()
+            .map(Arc::new)?;
+        let fs = runtime
+            .block_on(SlateDbFileSystem::open_in_memory(DATABASE_PATH))
+            .ok()?;
+        Some(Box::into_raw(Box::new(FfiFileSystem { runtime, fs })))
+    }))
+    .ok()
+    .flatten()
+    .unwrap_or(ptr::null_mut())
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_fs_destroy(fs: *mut FfiFileSystem) {
-    if !fs.is_null() {
-        let mut fs = Box::from_raw(fs);
-        let _ = fs.runtime.block_on(fs.fs.close());
+    if fs.is_null() {
+        return;
     }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        let mut fs = unsafe { Box::from_raw(fs) };
+        let _ = fs.runtime.block_on(fs.fs.close());
+    }));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_fs_open_options_init(options: *mut FfiOpenOptions) {
+    if let Some(options) = unsafe { options.as_mut() } {
+        *options = FfiOpenOptions {
+            struct_size: std::mem::size_of::<FfiOpenOptions>(),
+            read: 0,
+            write: 0,
+            create: 0,
+            append: 0,
+            truncate_existing: 0,
+        };
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_fs_open_file(
+    fs: *const FfiFileSystem,
+    path: *const c_char,
+    options: *const FfiOpenOptions,
+    output: *mut *mut FfiFileHandle,
+) -> i32 {
+    ffi_result(|| {
+        let output = unsafe { output.as_mut() }
+            .ok_or_else(|| invalid_argument("file handle output must not be null"))?;
+        *output = ptr::null_mut();
+        let fs = unsafe { require_fs(fs)? };
+        let path = unsafe { require_path(path, "file path")? };
+        let flags = unsafe { require_options(options)? };
+        let handle = fs.runtime.block_on(fs.fs.open_file(path, flags))?;
+        *output = Box::into_raw(Box::new(FfiFileHandle {
+            runtime: Arc::clone(&fs.runtime),
+            handle: Mutex::new(Some(handle)),
+        }));
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_close(handle: *const FfiFileHandle) -> i32 {
+    ffi_result(|| {
+        let handle = unsafe { handle.as_ref() }
+            .ok_or_else(|| invalid_argument("file handle pointer must not be null"))?;
+        let mut guard = handle
+            .handle
+            .lock()
+            .map_err(|_| invalid_argument("file handle lock is poisoned"))?;
+        let Some(file) = guard.as_mut() else {
+            return Ok(());
+        };
+        handle.runtime.block_on(file.close())?;
+        *guard = None;
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_destroy(handle: *mut FfiFileHandle) {
+    if handle.is_null() {
+        return;
+    }
+    let _ = unsafe { slatedb_file_close(handle) };
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        drop(Box::from_raw(handle));
+    }));
+}
+
+#[no_mangle]
+pub extern "C" fn slatedb_fs_last_error_is_retryable() -> i32 {
+    LAST_ERROR_RETRYABLE.with(Cell::get)
+}
+
+#[no_mangle]
+pub extern "C" fn slatedb_fs_last_error_message() -> *const c_char {
+    LAST_ERROR_MESSAGE.with(|message| message.borrow().as_ptr())
 }
 
 #[no_mangle]
@@ -67,4 +238,64 @@ pub extern "C" fn slatedb_fs_name() -> *const c_char {
 pub extern "C" fn slatedb_fs_dummy_error() -> *const c_char {
     static MSG: &[u8] = b"SlateDBFileSystem is a dummy implementation and cannot open files yet\0";
     MSG.as_ptr().cast()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    unsafe fn expect_ok(code: i32) {
+        if code != 0 {
+            let message = unsafe { CStr::from_ptr(slatedb_fs_last_error_message()) };
+            panic!(
+                "FFI call failed with code {code}: {}",
+                message.to_string_lossy()
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_open_close_lifecycle() {
+        unsafe {
+            let fs = slatedb_fs_create();
+            assert!(!fs.is_null());
+            let path = CString::new("database.db").unwrap();
+
+            let mut options = FfiOpenOptions {
+                struct_size: 0,
+                read: 0,
+                write: 0,
+                create: 0,
+                append: 0,
+                truncate_existing: 0,
+            };
+            slatedb_fs_open_options_init(&mut options);
+            options.read = 1;
+            options.write = 1;
+            options.create = 1;
+
+            let mut handle = ptr::null_mut();
+            expect_ok(slatedb_fs_open_file(
+                fs,
+                path.as_ptr(),
+                &options,
+                &mut handle,
+            ));
+            assert!(!handle.is_null());
+
+            expect_ok(slatedb_file_close(handle));
+            slatedb_file_destroy(handle);
+
+            options.read = 1;
+            options.write = 0;
+            options.create = 0;
+            let missing = CString::new("missing.db").unwrap();
+            let missing_error = slatedb_fs_open_file(fs, missing.as_ptr(), &options, &mut handle);
+            assert_eq!(missing_error, crate::ErrorCode::FileNotFound as i32);
+            assert_eq!(slatedb_fs_last_error_is_retryable(), 0);
+            assert!(handle.is_null());
+
+            slatedb_fs_destroy(fs);
+        }
+    }
 }
