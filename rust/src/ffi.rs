@@ -3,7 +3,8 @@ use std::cell::RefCell;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
-use std::sync::Arc;
+use std::slice;
+use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Runtime;
 
@@ -33,7 +34,7 @@ pub struct FfiFileSystem {
 
 pub struct FfiFileHandle {
     runtime: Arc<Runtime>,
-    handle: Option<SlateFileHandle>,
+    handle: Mutex<Option<SlateFileHandle>>,
 }
 
 thread_local! {
@@ -99,6 +100,44 @@ unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlag
     })
 }
 
+unsafe fn with_file_handle<T>(
+    handle: *const FfiFileHandle,
+    operation: impl FnOnce(&Runtime, &mut SlateFileHandle) -> Result<T>,
+) -> Result<T> {
+    let handle = unsafe { handle.as_ref() }
+        .ok_or_else(|| invalid_argument("file handle pointer must not be null"))?;
+    let mut guard = handle
+        .handle
+        .lock()
+        .map_err(|_| invalid_argument("file handle lock is poisoned"))?;
+    let file = guard
+        .as_mut()
+        .ok_or_else(|| invalid_argument("file handle is closed"))?;
+    operation(&handle.runtime, file)
+}
+
+unsafe fn read_buffer<'a>(buffer: *mut u8, len: usize) -> Result<&'a mut [u8]> {
+    if buffer.is_null() {
+        return if len == 0 {
+            Ok(&mut [])
+        } else {
+            Err(invalid_argument("read buffer must not be null"))
+        };
+    }
+    Ok(unsafe { slice::from_raw_parts_mut(buffer, len) })
+}
+
+unsafe fn write_buffer<'a>(buffer: *const u8, len: usize) -> Result<&'a [u8]> {
+    if buffer.is_null() {
+        return if len == 0 {
+            Ok(&[])
+        } else {
+            Err(invalid_argument("write buffer must not be null"))
+        };
+    }
+    Ok(unsafe { slice::from_raw_parts(buffer, len) })
+}
+
 #[no_mangle]
 pub extern "C" fn slatedb_fs_create() -> *mut FfiFileSystem {
     catch_unwind(AssertUnwindSafe(|| {
@@ -147,9 +186,86 @@ pub unsafe extern "C" fn slatedb_fs_open_file(
         let handle = fs.runtime.block_on(fs.fs.open_file(path, flags))?;
         *output = Box::into_raw(Box::new(FfiFileHandle {
             runtime: Arc::clone(&fs.runtime),
-            handle: Some(handle),
+            handle: Mutex::new(Some(handle)),
         }));
         Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_read(
+    handle: *const FfiFileHandle,
+    buffer: *mut u8,
+    len: usize,
+    bytes_read: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        let bytes_read = unsafe { bytes_read.as_mut() }
+            .ok_or_else(|| invalid_argument("bytes read output must not be null"))?;
+        *bytes_read = 0;
+        let buffer = unsafe { read_buffer(buffer, len)? };
+        *bytes_read = unsafe {
+            with_file_handle(handle, |runtime, file| runtime.block_on(file.read(buffer)))?
+        };
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_pread(
+    handle: *const FfiFileHandle,
+    buffer: *mut u8,
+    len: usize,
+    offset: u64,
+    bytes_read: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        let bytes_read = unsafe { bytes_read.as_mut() }
+            .ok_or_else(|| invalid_argument("bytes read output must not be null"))?;
+        *bytes_read = 0;
+        let buffer = unsafe { read_buffer(buffer, len)? };
+        *bytes_read = unsafe {
+            with_file_handle(handle, |runtime, file| {
+                runtime.block_on(file.pread(buffer, offset))
+            })?
+        };
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_write(
+    handle: *const FfiFileHandle,
+    buffer: *const u8,
+    len: usize,
+    bytes_written: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        let bytes_written = unsafe { bytes_written.as_mut() }
+            .ok_or_else(|| invalid_argument("bytes written output must not be null"))?;
+        *bytes_written = 0;
+        let buffer = unsafe { write_buffer(buffer, len)? };
+        *bytes_written = unsafe {
+            with_file_handle(handle, |runtime, file| runtime.block_on(file.write(buffer)))?
+        };
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_pwrite(
+    handle: *const FfiFileHandle,
+    buffer: *const u8,
+    len: usize,
+    offset: u64,
+) -> i32 {
+    ffi_result(|| {
+        let buffer = unsafe { write_buffer(buffer, len)? };
+        unsafe {
+            with_file_handle(handle, |runtime, file| {
+                runtime.block_on(file.pwrite(buffer, offset))
+            })
+        }
     })
 }
 
@@ -158,11 +274,15 @@ pub unsafe extern "C" fn slatedb_file_close(handle: *mut FfiFileHandle) -> i32 {
     ffi_result(|| {
         let handle = unsafe { handle.as_mut() }
             .ok_or_else(|| invalid_argument("file handle pointer must not be null"))?;
-        let Some(file) = handle.handle.as_mut() else {
+        let mut guard = handle
+            .handle
+            .lock()
+            .map_err(|_| invalid_argument("file handle lock is poisoned"))?;
+        let Some(file) = guard.as_mut() else {
             return Ok(());
         };
         handle.runtime.block_on(file.close())?;
-        handle.handle = None;
+        *guard = None;
         Ok(())
     })
 }
@@ -225,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_open_close_lifecycle() {
+    fn ffi_file_io_lifecycle() {
         unsafe {
             let fs = slatedb_fs_create();
             assert!(!fs.is_null());
@@ -248,12 +368,48 @@ mod tests {
             ));
             assert!(!handle.is_null());
 
+            let mut bytes_written = 0;
+            expect_ok(slatedb_file_write(
+                handle,
+                b"abcdef".as_ptr(),
+                6,
+                &mut bytes_written,
+            ));
+            assert_eq!(bytes_written, 6);
+            expect_ok(slatedb_file_pwrite(handle, b"XY".as_ptr(), 2, 2));
             expect_ok(slatedb_file_close(handle));
             slatedb_file_destroy(handle);
 
             options.read = 1;
             options.write = 0;
             options.create = 0;
+            expect_ok(slatedb_fs_open_file(
+                fs,
+                path.as_ptr(),
+                &options,
+                &mut handle,
+            ));
+            let mut contents = [0; 6];
+            let mut bytes_read = 0;
+            expect_ok(slatedb_file_read(
+                handle,
+                contents.as_mut_ptr(),
+                contents.len(),
+                &mut bytes_read,
+            ));
+            assert_eq!(bytes_read, contents.len());
+            assert_eq!(&contents, b"abXYef");
+            let mut middle = [0; 2];
+            expect_ok(slatedb_file_pread(
+                handle,
+                middle.as_mut_ptr(),
+                middle.len(),
+                2,
+                &mut bytes_read,
+            ));
+            assert_eq!(&middle, b"XY");
+            slatedb_file_destroy(handle);
+
             let missing = CString::new("missing.db").unwrap();
             let missing_error = slatedb_fs_open_file(fs, missing.as_ptr(), &options, &mut handle);
             assert_eq!(missing_error, crate::ErrorCode::FileNotFound as i32);

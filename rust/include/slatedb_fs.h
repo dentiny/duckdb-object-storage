@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -35,6 +36,12 @@ void slatedb_fs_destroy(slatedb_fs *fs);
 // The error message remains valid on the calling thread until its next failure.
 int32_t slatedb_fs_open_file(const slatedb_fs *fs, const char *path, const slatedb_fs_open_options *options,
                              slatedb_file_handle **output);
+int32_t slatedb_file_read(const slatedb_file_handle *handle, uint8_t *buffer, size_t len, size_t *bytes_read);
+int32_t slatedb_file_pread(const slatedb_file_handle *handle, uint8_t *buffer, size_t len, uint64_t offset,
+                           size_t *bytes_read);
+int32_t slatedb_file_write(const slatedb_file_handle *handle, const uint8_t *buffer, size_t len,
+                           size_t *bytes_written);
+int32_t slatedb_file_pwrite(const slatedb_file_handle *handle, const uint8_t *buffer, size_t len, uint64_t offset);
 int32_t slatedb_file_close(slatedb_file_handle *handle);
 void slatedb_file_destroy(slatedb_file_handle *handle);
 
