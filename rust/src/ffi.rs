@@ -1,8 +1,9 @@
 use std::any::Any;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
+use std::slice;
 use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Runtime;
@@ -17,7 +18,6 @@ const DATABASE_PATH: &str = "duckdb-object-storage";
 
 #[repr(C)]
 pub struct FfiOpenOptions {
-    struct_size: usize,
     read: i32,
     write: i32,
     create: i32,
@@ -40,7 +40,6 @@ pub struct FfiFileHandle {
 thread_local! {
     static LAST_ERROR_MESSAGE: RefCell<CString> =
         RefCell::new(CString::new("").expect("empty string has no NUL"));
-    static LAST_ERROR_RETRYABLE: Cell<i32> = const { Cell::new(0) };
 }
 
 fn invalid_argument(message: impl Into<String>) -> Error {
@@ -59,11 +58,9 @@ fn panic_message(payload: Box<dyn Any + Send>) -> String {
 
 fn store_error(error: Error) -> i32 {
     let code = error.code() as i32;
-    let retryable = i32::from(error.status() == ErrorStatus::Temporary);
     let message = CString::new(error.to_string().replace('\0', "\\0"))
         .expect("escaped error message cannot contain NUL");
     LAST_ERROR_MESSAGE.with(|slot| *slot.borrow_mut() = message);
-    LAST_ERROR_RETRYABLE.with(|slot| slot.set(retryable));
     code
 }
 
@@ -94,9 +91,6 @@ unsafe fn require_path<'a>(path: *const c_char, name: &str) -> Result<&'a str> {
 unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlags> {
     let options = unsafe { options.as_ref() }
         .ok_or_else(|| invalid_argument("open options must not be null"))?;
-    if options.struct_size < std::mem::size_of::<FfiOpenOptions>() {
-        return Err(invalid_argument("open options struct is too small"));
-    }
     Ok(FileOpenFlags {
         read: options.read != 0,
         write: options.write != 0,
@@ -104,6 +98,44 @@ unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlag
         append: options.append != 0,
         truncate_existing: options.truncate_existing != 0,
     })
+}
+
+unsafe fn with_file_handle<T>(
+    handle: *const FfiFileHandle,
+    operation: impl FnOnce(&Runtime, &mut SlateFileHandle) -> Result<T>,
+) -> Result<T> {
+    let handle = unsafe { handle.as_ref() }
+        .ok_or_else(|| invalid_argument("file handle pointer must not be null"))?;
+    let mut guard = handle
+        .handle
+        .lock()
+        .map_err(|_| invalid_argument("file handle lock is poisoned"))?;
+    let file = guard
+        .as_mut()
+        .ok_or_else(|| invalid_argument("file handle is closed"))?;
+    operation(&handle.runtime, file)
+}
+
+unsafe fn read_buffer<'a>(buffer: *mut u8, len: usize) -> Result<&'a mut [u8]> {
+    if buffer.is_null() {
+        return if len == 0 {
+            Ok(&mut [])
+        } else {
+            Err(invalid_argument("read buffer must not be null"))
+        };
+    }
+    Ok(unsafe { slice::from_raw_parts_mut(buffer, len) })
+}
+
+unsafe fn write_buffer<'a>(buffer: *const u8, len: usize) -> Result<&'a [u8]> {
+    if buffer.is_null() {
+        return if len == 0 {
+            Ok(&[])
+        } else {
+            Err(invalid_argument("write buffer must not be null"))
+        };
+    }
+    Ok(unsafe { slice::from_raw_parts(buffer, len) })
 }
 
 #[no_mangle]
@@ -138,20 +170,6 @@ pub unsafe extern "C" fn slatedb_fs_destroy(fs: *mut FfiFileSystem) {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_fs_open_options_init(options: *mut FfiOpenOptions) {
-    if let Some(options) = unsafe { options.as_mut() } {
-        *options = FfiOpenOptions {
-            struct_size: std::mem::size_of::<FfiOpenOptions>(),
-            read: 0,
-            write: 0,
-            create: 0,
-            append: 0,
-            truncate_existing: 0,
-        };
-    }
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn slatedb_fs_open_file(
     fs: *const FfiFileSystem,
     path: *const c_char,
@@ -175,9 +193,86 @@ pub unsafe extern "C" fn slatedb_fs_open_file(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_file_close(handle: *const FfiFileHandle) -> i32 {
+pub unsafe extern "C" fn slatedb_file_read(
+    handle: *const FfiFileHandle,
+    buffer: *mut u8,
+    len: usize,
+    bytes_read: *mut usize,
+) -> i32 {
     ffi_result(|| {
-        let handle = unsafe { handle.as_ref() }
+        let bytes_read = unsafe { bytes_read.as_mut() }
+            .ok_or_else(|| invalid_argument("bytes read output must not be null"))?;
+        *bytes_read = 0;
+        let buffer = unsafe { read_buffer(buffer, len)? };
+        *bytes_read = unsafe {
+            with_file_handle(handle, |runtime, file| runtime.block_on(file.read(buffer)))?
+        };
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_pread(
+    handle: *const FfiFileHandle,
+    buffer: *mut u8,
+    len: usize,
+    offset: u64,
+    bytes_read: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        let bytes_read = unsafe { bytes_read.as_mut() }
+            .ok_or_else(|| invalid_argument("bytes read output must not be null"))?;
+        *bytes_read = 0;
+        let buffer = unsafe { read_buffer(buffer, len)? };
+        *bytes_read = unsafe {
+            with_file_handle(handle, |runtime, file| {
+                runtime.block_on(file.pread(buffer, offset))
+            })?
+        };
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_write(
+    handle: *const FfiFileHandle,
+    buffer: *const u8,
+    len: usize,
+    bytes_written: *mut usize,
+) -> i32 {
+    ffi_result(|| {
+        let bytes_written = unsafe { bytes_written.as_mut() }
+            .ok_or_else(|| invalid_argument("bytes written output must not be null"))?;
+        *bytes_written = 0;
+        let buffer = unsafe { write_buffer(buffer, len)? };
+        *bytes_written = unsafe {
+            with_file_handle(handle, |runtime, file| runtime.block_on(file.write(buffer)))?
+        };
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_pwrite(
+    handle: *const FfiFileHandle,
+    buffer: *const u8,
+    len: usize,
+    offset: u64,
+) -> i32 {
+    ffi_result(|| {
+        let buffer = unsafe { write_buffer(buffer, len)? };
+        unsafe {
+            with_file_handle(handle, |runtime, file| {
+                runtime.block_on(file.pwrite(buffer, offset))
+            })
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_file_close(handle: *mut FfiFileHandle) -> i32 {
+    ffi_result(|| {
+        let handle = unsafe { handle.as_mut() }
             .ok_or_else(|| invalid_argument("file handle pointer must not be null"))?;
         let mut guard = handle
             .handle
@@ -201,11 +296,6 @@ pub unsafe extern "C" fn slatedb_file_destroy(handle: *mut FfiFileHandle) {
     let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
         drop(Box::from_raw(handle));
     }));
-}
-
-#[no_mangle]
-pub extern "C" fn slatedb_fs_last_error_is_retryable() -> i32 {
-    LAST_ERROR_RETRYABLE.with(Cell::get)
 }
 
 #[no_mangle]
@@ -255,24 +345,19 @@ mod tests {
     }
 
     #[test]
-    fn ffi_open_close_lifecycle() {
+    fn ffi_file_io_lifecycle() {
         unsafe {
             let fs = slatedb_fs_create();
             assert!(!fs.is_null());
             let path = CString::new("database.db").unwrap();
 
             let mut options = FfiOpenOptions {
-                struct_size: 0,
-                read: 0,
-                write: 0,
-                create: 0,
+                read: 1,
+                write: 1,
+                create: 1,
                 append: 0,
                 truncate_existing: 0,
             };
-            slatedb_fs_open_options_init(&mut options);
-            options.read = 1;
-            options.write = 1;
-            options.create = 1;
 
             let mut handle = ptr::null_mut();
             expect_ok(slatedb_fs_open_file(
@@ -283,16 +368,51 @@ mod tests {
             ));
             assert!(!handle.is_null());
 
+            let mut bytes_written = 0;
+            expect_ok(slatedb_file_write(
+                handle,
+                b"abcdef".as_ptr(),
+                6,
+                &mut bytes_written,
+            ));
+            assert_eq!(bytes_written, 6);
+            expect_ok(slatedb_file_pwrite(handle, b"XY".as_ptr(), 2, 2));
             expect_ok(slatedb_file_close(handle));
             slatedb_file_destroy(handle);
 
             options.read = 1;
             options.write = 0;
             options.create = 0;
+            expect_ok(slatedb_fs_open_file(
+                fs,
+                path.as_ptr(),
+                &options,
+                &mut handle,
+            ));
+            let mut contents = [0; 6];
+            let mut bytes_read = 0;
+            expect_ok(slatedb_file_read(
+                handle,
+                contents.as_mut_ptr(),
+                contents.len(),
+                &mut bytes_read,
+            ));
+            assert_eq!(bytes_read, contents.len());
+            assert_eq!(&contents, b"abXYef");
+            let mut middle = [0; 2];
+            expect_ok(slatedb_file_pread(
+                handle,
+                middle.as_mut_ptr(),
+                middle.len(),
+                2,
+                &mut bytes_read,
+            ));
+            assert_eq!(&middle, b"XY");
+            slatedb_file_destroy(handle);
+
             let missing = CString::new("missing.db").unwrap();
             let missing_error = slatedb_fs_open_file(fs, missing.as_ptr(), &options, &mut handle);
             assert_eq!(missing_error, crate::ErrorCode::FileNotFound as i32);
-            assert_eq!(slatedb_fs_last_error_is_retryable(), 0);
             assert!(handle.is_null());
 
             slatedb_fs_destroy(fs);
