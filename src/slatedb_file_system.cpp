@@ -161,7 +161,7 @@ bool SlateDBFileSystem::ListFiles(const string &, const std::function<void(const
 }
 
 bool SlateDBFileSystem::CanHandleFile(const string &fpath) {
-	return fpath.rfind("slatedb:", 0) == 0;
+	return fpath.rfind("duckdb_objfs:", 0) == 0;
 }
 
 string SlateDBFileSystem::PathSeparator(const string &) {

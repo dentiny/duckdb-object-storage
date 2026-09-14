@@ -20,7 +20,7 @@ unique_ptr<FileHandle> CreateFile(SlateDBFileSystem &fs, const string &path) {
 
 TEST_CASE("SlateDBFileHandle owns and closes its FFI handle", "[slatedb_fs]") {
 	SlateDBFileSystem fs;
-	auto handle = CreateFile(fs, "slatedb://close.db");
+	auto handle = CreateFile(fs, "duckdb_objfs://close.db");
 
 	REQUIRE(handle);
 	REQUIRE_NOTHROW(handle->Cast<SlateDBFileHandle>());
@@ -30,7 +30,7 @@ TEST_CASE("SlateDBFileHandle owns and closes its FFI handle", "[slatedb_fs]") {
 
 TEST_CASE("SlateDBFileSystem maps DuckDB open flags", "[slatedb_fs]") {
 	SlateDBFileSystem fs;
-	const string path = "slatedb://flags.db";
+	const string path = "duckdb_objfs://flags.db";
 
 	auto missing = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
 	REQUIRE(!missing);
@@ -56,7 +56,7 @@ TEST_CASE("SlateDBFileSystem maps DuckDB open flags", "[slatedb_fs]") {
 
 TEST_CASE("SlateDBFileSystem forwards sequential IO and seeking", "[slatedb_fs]") {
 	SlateDBFileSystem fs;
-	auto handle = CreateFile(fs, "slatedb://sequential.db");
+	auto handle = CreateFile(fs, "duckdb_objfs://sequential.db");
 	std::array<uint8_t, 4> input {'a', 'b', 'c', 'd'};
 
 	REQUIRE(fs.Write(*handle, input.data(), input.size()) == 4);
@@ -77,7 +77,7 @@ TEST_CASE("SlateDBFileSystem forwards sequential IO and seeking", "[slatedb_fs]"
 
 TEST_CASE("SlateDBFileSystem forwards positional IO", "[slatedb_fs]") {
 	SlateDBFileSystem fs;
-	auto handle = CreateFile(fs, "slatedb://positional.db");
+	auto handle = CreateFile(fs, "duckdb_objfs://positional.db");
 	std::array<uint8_t, 4> initial {'a', 'b', 'c', 'd'};
 	fs.Write(*handle, initial.data(), initial.size(), 0);
 
@@ -93,7 +93,7 @@ TEST_CASE("SlateDBFileSystem forwards positional IO", "[slatedb_fs]") {
 
 TEST_CASE("SlateDBFileSystem forwards sync and truncate", "[slatedb_fs]") {
 	SlateDBFileSystem fs;
-	const string path = "slatedb://truncate.db";
+	const string path = "duckdb_objfs://truncate.db";
 	auto handle = CreateFile(fs, path);
 	std::array<uint8_t, 4> input {'a', 'b', 'c', 'd'};
 
@@ -113,8 +113,8 @@ TEST_CASE("SlateDBFileSystem forwards sync and truncate", "[slatedb_fs]") {
 
 TEST_CASE("SlateDBFileSystem forwards file catalog operations", "[slatedb_fs]") {
 	SlateDBFileSystem fs;
-	const string source = "slatedb://source.db";
-	const string target = "slatedb://target.db";
+	const string source = "duckdb_objfs://source.db";
+	const string target = "duckdb_objfs://target.db";
 
 	REQUIRE(!fs.FileExists(source));
 	CreateFile(fs, source)->Close();
@@ -131,9 +131,9 @@ TEST_CASE("SlateDBFileSystem forwards file catalog operations", "[slatedb_fs]") 
 
 TEST_CASE("SlateDBFileSystem converts FFI errors to DuckDB exceptions", "[slatedb_fs]") {
 	SlateDBFileSystem fs;
-	auto writable = CreateFile(fs, "slatedb://readonly.db");
+	auto writable = CreateFile(fs, "duckdb_objfs://readonly.db");
 	writable->Close();
-	auto read_only = fs.OpenFile("slatedb://readonly.db", FileFlags::FILE_FLAGS_READ);
+	auto read_only = fs.OpenFile("duckdb_objfs://readonly.db", FileFlags::FILE_FLAGS_READ);
 	std::array<uint8_t, 1> byte {'x'};
 
 	REQUIRE_THROWS_AS(fs.Write(*read_only, byte.data(), byte.size()), IOException);
