@@ -22,15 +22,15 @@ SELECT duckdb_object_storage_openssl_version('Michael') ILIKE 'DuckdbObjectStora
 ----
 true
 
-# SlateDB VFS is registered and claims slatedb:// paths
+# SlateDB VFS is registered and claims duckdb_objfs:// paths
 statement error
-SELECT * FROM glob('slatedb://dummy/**');
+SELECT * FROM glob('duckdb_objfs://dummy/**');
 ----
 dummy implementation
 
 # DuckDB can create, checkpoint, detach, and reopen a database through SlateDB
 statement ok
-ATTACH 'slatedb://integration.db' AS object_db
+ATTACH 'duckdb_objfs://integration.db' AS object_db
 
 statement ok
 CREATE TABLE object_db.items(i INTEGER)
@@ -50,7 +50,7 @@ statement ok
 DETACH object_db
 
 statement ok
-ATTACH 'slatedb://integration.db' AS object_db
+ATTACH 'duckdb_objfs://integration.db' AS object_db
 
 query I
 SELECT sum(i) FROM object_db.items
