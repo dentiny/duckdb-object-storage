@@ -4,8 +4,8 @@
 
 #include <cstdint>
 
-namespace duckdb::slatedb_ffi {
+namespace duckdb {
 
-void ThrowIfError(int32_t code, const string &operation);
+void ThrowSlateDBError(int32_t code, const string &operation);
 
-} // namespace duckdb::slatedb_ffi
+} // namespace duckdb

@@ -20,7 +20,7 @@ void SlateDBFileHandle::Close() {
 	if (!impl) {
 		return;
 	}
-	slatedb_ffi::ThrowIfError(slatedb_file_close(impl.get()), "close file");
+	ThrowSlateDBError(slatedb_file_close(impl.get()), "close file");
 	impl.reset();
 }
 

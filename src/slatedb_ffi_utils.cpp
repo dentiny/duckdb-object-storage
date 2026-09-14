@@ -3,9 +3,9 @@
 #include "duckdb/common/exception.hpp"
 #include "slatedb_fs.h"
 
-namespace duckdb::slatedb_ffi {
+namespace duckdb {
 
-void ThrowIfError(int32_t code, const string &operation) {
+void ThrowSlateDBError(int32_t code, const string &operation) {
 	if (code == SLATEDB_FS_ERROR_NONE) {
 		return;
 	}
@@ -17,4 +17,4 @@ void ThrowIfError(int32_t code, const string &operation) {
 	throw IOException("%s: %s", operation, detail);
 }
 
-} // namespace duckdb::slatedb_ffi
+} // namespace duckdb
