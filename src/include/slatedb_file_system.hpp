@@ -15,25 +15,6 @@ struct SlateDBFsDeleter {
 	}
 };
 
-struct SlateDBFileHandleDeleter {
-	void operator()(slatedb_file_handle *ptr) const;
-};
-
-class SlateDBFileHandle : public FileHandle {
-public:
-	SlateDBFileHandle(FileSystem &file_system, string path, FileOpenFlags flags, slatedb_file_handle *handle);
-	~SlateDBFileHandle() override;
-
-	void Close() override;
-
-private:
-	friend class SlateDBFileSystem;
-
-	slatedb_file_handle *GetHandle() const;
-
-	unique_ptr<slatedb_file_handle, SlateDBFileHandleDeleter> impl;
-};
-
 //! DuckDB filesystem adapter over the Rust SlateDB crate.
 class SlateDBFileSystem : public FileSystem {
 public:

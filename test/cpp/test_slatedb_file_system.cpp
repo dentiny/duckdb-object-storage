@@ -1,6 +1,7 @@
 #define CATCH_CONFIG_MAIN
 #include "catch.hpp"
 
+#include "slatedb_file_handle.hpp"
 #include "slatedb_file_system.hpp"
 #include "duckdb/common/exception.hpp"
 
@@ -22,6 +23,7 @@ TEST_CASE("SlateDBFileHandle owns and closes its FFI handle", "[slatedb_fs]") {
 	auto handle = CreateFile(fs, "slatedb://close.db");
 
 	REQUIRE(handle);
+	REQUIRE_NOTHROW(handle->Cast<SlateDBFileHandle>());
 	REQUIRE_NOTHROW(handle->Close());
 	REQUIRE_NOTHROW(handle->Close());
 }
