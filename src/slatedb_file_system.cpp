@@ -2,6 +2,7 @@
 #include "slatedb_file_system.hpp"
 #include "slatedb_ffi_utils.hpp"
 #include "slatedb_file_handle.hpp"
+#include "slatedb_path_utils.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/numeric_utils.hpp"
@@ -30,21 +31,6 @@ size_t CheckedSize(int64_t size, const string &operation) {
 		throw InvalidInputException("%s: byte count must not be negative", operation);
 	}
 	return NumericCast<size_t>(size);
-}
-
-string LogicalPath(const string &path) {
-	const string prefix = "duckdb_objfs:";
-	if (!StringUtil::StartsWith(path, prefix)) {
-		throw InvalidInputException("Object filesystem path must start with '%s'", prefix);
-	}
-	auto logical_path = path.substr(prefix.size());
-	while (!logical_path.empty() && logical_path[0] == '/') {
-		logical_path.erase(0, 1);
-	}
-	if (logical_path.empty()) {
-		throw InvalidInputException("Object filesystem path must name a file");
-	}
-	return logical_path;
 }
 
 } // namespace
@@ -80,7 +66,7 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 		return impl.get();
 	}
 
-	auto backend = slatedb_config::GetOptionalSetting(opener, "duckdb_objfs_backend");
+	auto backend = GetOptionalSetting(opener, "duckdb_objfs_backend");
 	if (backend.empty()) {
 		backend = "local";
 	}
@@ -91,7 +77,7 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 		return impl.get();
 	}
 	if (backend == "local") {
-		auto local_path = slatedb_config::GetOptionalSetting(opener, "duckdb_objfs_root");
+		auto local_path = GetOptionalSetting(opener, "duckdb_objfs_root");
 		if (local_path.empty()) {
 			local_path = ".duckdb_objfs";
 		}
@@ -105,7 +91,7 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 		                                    backend);
 	}
 
-	auto config = slatedb_config::ReadS3InitializationConfig(opener);
+	auto config = ReadS3InitializationConfig(opener);
 	slatedb_s3_config ffi_config {
 	    config.bucket.c_str(),        config.root.c_str(),   config.endpoint.c_str(),
 	    config.region.c_str(),        config.key_id.c_str(), config.secret.c_str(),
@@ -249,7 +235,7 @@ string SlateDBFileSystem::PathSeparator(const string &) {
 }
 
 string SlateDBFileSystem::CanonicalizePath(const string &path, optional_ptr<FileOpener>) {
-	return "duckdb_objfs://" + LogicalPath(path);
+	return StringUtil::Format("duckdb_objfs://%s", LogicalPath(path));
 }
 
 std::string SlateDBFileSystem::GetName() const {

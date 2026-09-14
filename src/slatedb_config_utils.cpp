@@ -1,10 +1,10 @@
 #include "slatedb_config_utils.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/secret/secret.hpp"
 
 namespace duckdb {
-namespace slatedb_config {
 
 string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name) {
 	Value value;
@@ -38,13 +38,13 @@ S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opene
 		result.root = "duckdb_objfs";
 	}
 
-	auto secret_path = "s3://" + result.bucket;
+	auto secret_path = StringUtil::Format("s3://%s", result.bucket);
 	if (!result.root.empty()) {
 		auto scope_root = result.root;
 		while (!scope_root.empty() && scope_root[0] == '/') {
 			scope_root.erase(0, 1);
 		}
-		secret_path += "/" + scope_root;
+		secret_path = StringUtil::Format("%s/%s", secret_path, scope_root);
 	}
 	FileOpenerInfo info {secret_path};
 	KeyValueSecretReader secret_reader(*opener, &info, "s3");
@@ -64,5 +64,4 @@ S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opene
 	return result;
 }
 
-} // namespace slatedb_config
 } // namespace duckdb

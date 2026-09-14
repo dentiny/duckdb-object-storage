@@ -40,3 +40,17 @@ Set `duckdb_objfs_root` before the first `duckdb_objfs://` access to use a
 different local directory. For S3, the same setting selects the object prefix
 inside the bucket. The `memory` backend remains available for tests; set
 `duckdb_objfs_backend = 's3'` to use object storage.
+
+## Path semantics
+
+The URI contains a logical DuckDB file name. It does not contain a local path,
+S3 bucket, or concrete object key:
+
+```sql
+ATTACH 'duckdb_objfs://analytics/report.db' AS reports;
+```
+
+The filesystem passes `analytics/report.db` to SlateDB. With the local backend,
+SlateDB stores its objects below `duckdb_objfs_root`. With S3, it stores them
+below `s3://<duckdb_objfs_bucket>/<duckdb_objfs_root>/`; SlateDB owns the
+physical object-key layout below that location.

@@ -3,7 +3,6 @@
 #include "duckdb/common/file_opener.hpp"
 
 namespace duckdb {
-namespace slatedb_config {
 
 struct S3InitializationConfig {
 	string bucket;
@@ -21,5 +20,4 @@ string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name);
 string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name);
 S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener);
 
-} // namespace slatedb_config
 } // namespace duckdb
