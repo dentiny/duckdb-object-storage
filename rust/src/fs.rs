@@ -7,6 +7,7 @@ use slatedb::config::Settings;
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use slatedb::db_cache::{DbCache, SplitCache};
 use slatedb::Db;
+use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue, Metrics};
 
 use crate::database_metadata::DatabaseMetadata;
 use crate::error::{Error, Result};
@@ -26,6 +27,8 @@ pub const NAME: &str = "SlateDBFileSystem";
 /// owns the runtime used to drive these asynchronous operations.
 pub struct SlateDbFileSystem {
     db: Option<Arc<Db>>,
+    metrics: Arc<DefaultMetricsRecorder>,
+    cache_stats_config: CacheStatsConfig,
 }
 
 pub struct S3StorageConfig {
@@ -84,6 +87,65 @@ impl Default for CacheConfig {
     }
 }
 
+#[derive(Clone, Copy)]
+struct CacheStatsConfig {
+    block_cache_size_bytes: u64,
+    metadata_cache_size_bytes: u64,
+    persistent_cache_enabled: bool,
+    persistent_cache_size_bytes: u64,
+}
+
+impl From<&CacheConfig> for CacheStatsConfig {
+    fn from(config: &CacheConfig) -> Self {
+        Self {
+            block_cache_size_bytes: config.block_cache_size_bytes,
+            metadata_cache_size_bytes: config.metadata_cache_size_bytes,
+            persistent_cache_enabled: config.persistent_cache_path.is_some(),
+            persistent_cache_size_bytes: config.persistent_cache_size_bytes as u64,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CacheStats {
+    pub block_cache_enabled: bool,
+    pub block_cache_hits: u64,
+    pub block_cache_misses: u64,
+    pub block_cache_capacity_bytes: u64,
+    pub metadata_cache_enabled: bool,
+    pub metadata_cache_hits: u64,
+    pub metadata_cache_misses: u64,
+    pub metadata_cache_capacity_bytes: u64,
+    pub persistent_cache_enabled: bool,
+    pub persistent_cache_hits: u64,
+    pub persistent_cache_misses: u64,
+    pub persistent_cache_entries: u64,
+    pub persistent_cache_size_bytes: u64,
+    pub persistent_cache_capacity_bytes: u64,
+    pub persistent_cache_evictions: u64,
+    pub persistent_cache_evicted_bytes: u64,
+}
+
+fn metric_counter(metrics: &Metrics, name: &str, labels: &[(&str, &str)]) -> u64 {
+    metrics
+        .by_name_and_labels(name, labels)
+        .and_then(|metric| match metric.value {
+            MetricValue::Counter(value) => Some(value),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn metric_gauge(metrics: &Metrics, name: &str, labels: &[(&str, &str)]) -> u64 {
+    metrics
+        .by_name_and_labels(name, labels)
+        .and_then(|metric| match metric.value {
+            MetricValue::Gauge(value) => u64::try_from(value).ok(),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 impl SlateDbFileSystem {
     /// Opens SlateDB on top of an OpenDAL storage operator.
     pub async fn open(database_path: &str, operator: Operator) -> Result<Self> {
@@ -103,6 +165,8 @@ impl SlateDbFileSystem {
         }
 
         let object_store = Arc::new(OpendalStore::new(operator));
+        let cache_stats_config = CacheStatsConfig::from(&cache_config);
+        let metrics = Arc::new(DefaultMetricsRecorder::new());
         let mut settings = Settings::default();
         if let Some(path) = cache_config.persistent_cache_path {
             settings.object_store_cache_options.root_folder = Some(path);
@@ -116,7 +180,9 @@ impl SlateDbFileSystem {
                 cache_config.persistent_cache_on_compaction;
         }
 
-        let mut builder = Db::builder(database_path, object_store).with_settings(settings);
+        let mut builder = Db::builder(database_path, object_store)
+            .with_settings(settings)
+            .with_metrics_recorder(metrics.clone());
         if cache_config.block_cache_size_bytes == 0 && cache_config.metadata_cache_size_bytes == 0 {
             builder = builder.with_db_cache_disabled();
         } else {
@@ -137,6 +203,8 @@ impl SlateDbFileSystem {
         let db = builder.build().await?;
         Ok(Self {
             db: Some(Arc::new(db)),
+            metrics,
+            cache_stats_config,
         })
     }
 
@@ -205,6 +273,69 @@ impl SlateDbFileSystem {
             )
         })?;
         Self::open_with_cache_config(database_path, operator, cache_config).await
+    }
+
+    pub fn cache_stats(&self) -> CacheStats {
+        const DB_CACHE_ACCESS_COUNT: &str = "slatedb.db_cache.access_count";
+        const PERSISTENT_HIT_COUNT: &str = "slatedb.object_store_cache.part_hit_count";
+        const PERSISTENT_ACCESS_COUNT: &str = "slatedb.object_store_cache.part_access_count";
+        const PERSISTENT_CACHE_KEYS: &str = "slatedb.object_store_cache.cache_keys";
+        const PERSISTENT_CACHE_BYTES: &str = "slatedb.object_store_cache.cache_bytes";
+        const PERSISTENT_EVICTED_KEYS: &str = "slatedb.object_store_cache.evicted_keys";
+        const PERSISTENT_EVICTED_BYTES: &str = "slatedb.object_store_cache.evicted_bytes";
+
+        let metrics = self.metrics.snapshot();
+        let block_hits = metric_counter(
+            &metrics,
+            DB_CACHE_ACCESS_COUNT,
+            &[("entry_kind", "data_block"), ("result", "hit")],
+        );
+        let block_misses = metric_counter(
+            &metrics,
+            DB_CACHE_ACCESS_COUNT,
+            &[("entry_kind", "data_block"), ("result", "miss")],
+        );
+        let metadata_hits = ["filter", "index", "stats"]
+            .iter()
+            .map(|entry_kind| {
+                metric_counter(
+                    &metrics,
+                    DB_CACHE_ACCESS_COUNT,
+                    &[("entry_kind", entry_kind), ("result", "hit")],
+                )
+            })
+            .sum();
+        let metadata_misses = ["filter", "index", "stats"]
+            .iter()
+            .map(|entry_kind| {
+                metric_counter(
+                    &metrics,
+                    DB_CACHE_ACCESS_COUNT,
+                    &[("entry_kind", entry_kind), ("result", "miss")],
+                )
+            })
+            .sum();
+        let persistent_hits = metric_counter(&metrics, PERSISTENT_HIT_COUNT, &[]);
+        let persistent_accesses = metric_counter(&metrics, PERSISTENT_ACCESS_COUNT, &[]);
+
+        CacheStats {
+            block_cache_enabled: self.cache_stats_config.block_cache_size_bytes > 0,
+            block_cache_hits: block_hits,
+            block_cache_misses: block_misses,
+            block_cache_capacity_bytes: self.cache_stats_config.block_cache_size_bytes,
+            metadata_cache_enabled: self.cache_stats_config.metadata_cache_size_bytes > 0,
+            metadata_cache_hits: metadata_hits,
+            metadata_cache_misses: metadata_misses,
+            metadata_cache_capacity_bytes: self.cache_stats_config.metadata_cache_size_bytes,
+            persistent_cache_enabled: self.cache_stats_config.persistent_cache_enabled,
+            persistent_cache_hits: persistent_hits,
+            persistent_cache_misses: persistent_accesses.saturating_sub(persistent_hits),
+            persistent_cache_entries: metric_gauge(&metrics, PERSISTENT_CACHE_KEYS, &[]),
+            persistent_cache_size_bytes: metric_gauge(&metrics, PERSISTENT_CACHE_BYTES, &[]),
+            persistent_cache_capacity_bytes: self.cache_stats_config.persistent_cache_size_bytes,
+            persistent_cache_evictions: metric_counter(&metrics, PERSISTENT_EVICTED_KEYS, &[]),
+            persistent_cache_evicted_bytes: metric_counter(&metrics, PERSISTENT_EVICTED_BYTES, &[]),
+        }
     }
 
     /// Open a logical file, creating its persistent catalog entry when allowed.
