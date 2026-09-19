@@ -168,7 +168,7 @@ unsafe fn require_s3_config(config: *const FfiS3Config) -> Result<S3StorageConfi
     })
 }
 
-unsafe fn cache_config(config: *const FfiCacheConfig) -> Result<CacheConfig> {
+unsafe fn parse_cache_config(config: *const FfiCacheConfig) -> Result<CacheConfig> {
     let Some(config) = (unsafe { config.as_ref() }) else {
         return Ok(CacheConfig::default());
     };
@@ -296,17 +296,17 @@ fn create_runtime() -> Result<Arc<Runtime>> {
 
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_fs_create_memory(
-    cache: *const FfiCacheConfig,
+    cache_config: *const FfiCacheConfig,
     output: *mut *mut FfiFileSystem,
 ) -> i32 {
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
-        let cache = unsafe { cache_config(cache)? };
+        let cache_config = unsafe { parse_cache_config(cache_config)? };
         let runtime = create_runtime()?;
         let fs = runtime.block_on(SlateDbFileSystem::open_in_memory_with_cache_config(
             DATABASE_PATH,
-            cache,
+            cache_config,
         ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
@@ -316,7 +316,7 @@ pub unsafe extern "C" fn slatedb_fs_create_memory(
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_fs_create_local(
     root: *const c_char,
-    cache: *const FfiCacheConfig,
+    cache_config: *const FfiCacheConfig,
     output: *mut *mut FfiFileSystem,
 ) -> i32 {
     ffi_result(|| {
@@ -326,12 +326,12 @@ pub unsafe extern "C" fn slatedb_fs_create_local(
         if root.is_empty() {
             return Err(invalid_argument("local root must not be empty"));
         }
-        let cache = unsafe { cache_config(cache)? };
+        let cache_config = unsafe { parse_cache_config(cache_config)? };
         let runtime = create_runtime()?;
         let fs = runtime.block_on(SlateDbFileSystem::open_local_with_cache_config(
             DATABASE_PATH,
             root,
-            cache,
+            cache_config,
         ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
@@ -341,19 +341,19 @@ pub unsafe extern "C" fn slatedb_fs_create_local(
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_fs_create_s3(
     config: *const FfiS3Config,
-    cache: *const FfiCacheConfig,
+    cache_config: *const FfiCacheConfig,
     output: *mut *mut FfiFileSystem,
 ) -> i32 {
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
         let config = unsafe { require_s3_config(config)? };
-        let cache = unsafe { cache_config(cache)? };
+        let cache_config = unsafe { parse_cache_config(cache_config)? };
         let runtime = create_runtime()?;
         let fs = runtime.block_on(SlateDbFileSystem::open_s3_with_cache_config(
             DATABASE_PATH,
             config,
-            cache,
+            cache_config,
         ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())

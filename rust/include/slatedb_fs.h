@@ -82,9 +82,9 @@ typedef enum slatedb_fs_error_code {
 	SLATEDB_FS_ERROR_IO = 7,
 } slatedb_fs_error_code;
 
-int32_t slatedb_fs_create_memory(const slatedb_cache_config *cache, slatedb_fs **output);
-int32_t slatedb_fs_create_local(const char *root, const slatedb_cache_config *cache, slatedb_fs **output);
-int32_t slatedb_fs_create_s3(const slatedb_s3_config *config, const slatedb_cache_config *cache,
+int32_t slatedb_fs_create_memory(const slatedb_cache_config *cache_config, slatedb_fs **output);
+int32_t slatedb_fs_create_local(const char *root, const slatedb_cache_config *cache_config, slatedb_fs **output);
+int32_t slatedb_fs_create_s3(const slatedb_s3_config *config, const slatedb_cache_config *cache_config,
                              slatedb_fs **output);
 void slatedb_fs_destroy(slatedb_fs *fs);
 
