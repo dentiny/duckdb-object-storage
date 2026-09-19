@@ -79,6 +79,21 @@ The extension enables SlateDB's Foyer in-memory cache by default. Data blocks
 use up to 512 MiB and SST metadata uses up to 128 MiB. These limits are
 independent of DuckDB's buffer-manager memory limit:
 
+Default cache settings are:
+
+- `duckdb_objfs_memory_cache_size`: 536870912 bytes (512 MiB);
+- `duckdb_objfs_metadata_cache_size`: 134217728 bytes (128 MiB);
+- `duckdb_objfs_cache_shards`: `0` (automatic);
+- `duckdb_objfs_persistent_cache_path`: empty (persistent cache disabled);
+- `duckdb_objfs_persistent_cache_size`: 17179869184 bytes (16 GiB, used only
+  when a persistent cache path is set);
+- `duckdb_objfs_persistent_cache_part_size`: 4194304 bytes (4 MiB);
+- `duckdb_objfs_persistent_cache_preload`: `none`;
+- `duckdb_objfs_persistent_cache_on_flush`: `false`;
+- `duckdb_objfs_persistent_cache_on_compaction`: `false`.
+
+For example, to reduce the in-memory limits:
+
 ```sql
 SET duckdb_objfs_memory_cache_size = 268435456;   -- 256 MiB
 SET duckdb_objfs_metadata_cache_size = 67108864; -- 64 MiB
@@ -94,14 +109,15 @@ enable it, which is most useful with the S3 backend:
 SET duckdb_objfs_persistent_cache_path = '/var/cache/duckdb-objfs';
 SET duckdb_objfs_persistent_cache_size = 17179869184;     -- 16 GiB
 SET duckdb_objfs_persistent_cache_part_size = 4194304;    -- 4 MiB
-SET duckdb_objfs_persistent_cache_preload = 'l0';         -- none, l0, or all
+SET duckdb_objfs_persistent_cache_preload = 'l0';         -- opt in to L0 preload
 SET duckdb_objfs_persistent_cache_on_flush = false;
 SET duckdb_objfs_persistent_cache_on_compaction = false;
 ```
 
 The part size must be a non-zero multiple of 1024 bytes. Cache settings are
-read when the filesystem is initialized, so configure them before the first
-`duckdb_objfs://` access.
+read once when the filesystem is initialized. Configure them before the first
+`duckdb_objfs://` access; changing these settings afterward does not
+reconfigure the running cache.
 
 ## Path semantics
 
