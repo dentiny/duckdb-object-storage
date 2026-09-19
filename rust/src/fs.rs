@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::SlateFileHandle;
 use crate::flags::FileOpenFlags;
+use crate::flush_batcher::FlushBatcher;
 use crate::io_metrics::IoMetrics;
 use crate::opendal_io_metrics_layer::IoMetricsLayer;
 
@@ -27,6 +28,9 @@ pub const NAME: &str = "SlateDBFileSystem";
 /// owns the runtime used to drive these asynchronous operations.
 pub struct SlateDbFileSystem {
     db: Option<Arc<Db>>,
+    /// Shares one WAL flush between the handles syncing at the same time.
+    /// Released with `db`, so a closed filesystem holds no database reference.
+    flush_batcher: Option<Arc<FlushBatcher>>,
     pub(crate) cache_metrics: CacheMetrics,
     pub(crate) io_metrics: Arc<IoMetrics>,
 }
@@ -84,9 +88,11 @@ impl SlateDbFileSystem {
             Some(cache) => builder = builder.with_db_cache(cache),
             None => builder = builder.with_db_cache_disabled(),
         }
-        let db = builder.build().await?;
+        let db = Arc::new(builder.build().await?);
+        let flush_batcher = Arc::new(FlushBatcher::new(Arc::clone(&db)));
         Ok(Self {
-            db: Some(Arc::new(db)),
+            db: Some(db),
+            flush_batcher: Some(flush_batcher),
             cache_metrics,
             io_metrics,
         })
@@ -165,50 +171,31 @@ impl SlateDbFileSystem {
     pub async fn open_file(&self, path: &str, flags: FileOpenFlags) -> Result<SlateFileHandle> {
         flags.validate()?;
 
-        let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
-            Error::InvalidArgument(ErrorStruct::new(
-                "filesystem is closed".to_string(),
-                ErrorStatus::Permanent,
-            ))
-        })?);
+        let db = self.db()?;
+        let flush_batcher = self.flush_batcher()?;
         let database_metadata = DatabaseMetadata::new(Arc::clone(&db));
         let (file_id, metadata) = database_metadata
             .prepare_file_for_open(path, flags.create, flags.truncate_existing)
             .await?;
 
-        SlateFileHandle::new(db, file_id, metadata, flags)
+        SlateFileHandle::new(db, flush_batcher, file_id, metadata, flags)
     }
 
     /// Returns whether a logical path is present in the database catalog.
     pub async fn file_exists(&self, path: &str) -> Result<bool> {
-        let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
-            Error::InvalidArgument(ErrorStruct::new(
-                "filesystem is closed".to_string(),
-                ErrorStatus::Permanent,
-            ))
-        })?);
+        let db = self.db()?;
         DatabaseMetadata::new(db).file_exists(path).await
     }
 
     /// Atomically removes a logical file and all of its persisted state.
     pub async fn remove_file(&self, path: &str) -> Result<()> {
-        let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
-            Error::InvalidArgument(ErrorStruct::new(
-                "filesystem is closed".to_string(),
-                ErrorStatus::Permanent,
-            ))
-        })?);
+        let db = self.db()?;
         DatabaseMetadata::new(db).remove_file(path).await
     }
 
     /// Atomically moves a logical file, replacing the destination if present.
     pub async fn move_file(&self, source: &str, target: &str) -> Result<()> {
-        let db = Arc::clone(self.db.as_ref().ok_or_else(|| {
-            Error::InvalidArgument(ErrorStruct::new(
-                "filesystem is closed".to_string(),
-                ErrorStatus::Permanent,
-            ))
-        })?);
+        let db = self.db()?;
         DatabaseMetadata::new(db).move_file(source, target).await
     }
 
@@ -217,12 +204,29 @@ impl SlateDbFileSystem {
     /// Calling `close` more than once is harmless. SlateDB marks all clones of
     /// the database closed.
     pub async fn close(&mut self) -> Result<()> {
+        self.flush_batcher = None;
         let Some(db) = self.db.take() else {
             return Ok(());
         };
 
         db.close().await?;
         Ok(())
+    }
+
+    #[track_caller]
+    fn db(&self) -> Result<Arc<Db>> {
+        match self.db.as_ref() {
+            Some(db) => Ok(Arc::clone(db)),
+            None => Err(closed()),
+        }
+    }
+
+    #[track_caller]
+    fn flush_batcher(&self) -> Result<Arc<FlushBatcher>> {
+        match self.flush_batcher.as_ref() {
+            Some(flush_batcher) => Ok(Arc::clone(flush_batcher)),
+            None => Err(closed()),
+        }
     }
 
     pub fn name(&self) -> &'static str {
@@ -232,6 +236,14 @@ impl SlateDbFileSystem {
     pub fn can_handle(&self, path: &str) -> bool {
         path.starts_with(PREFIX)
     }
+}
+
+#[track_caller]
+fn closed() -> Error {
+    Error::InvalidArgument(ErrorStruct::new(
+        "filesystem is closed".to_string(),
+        ErrorStatus::Permanent,
+    ))
 }
 
 fn build_s3_operator(config: S3StorageConfig) -> Result<Operator> {
@@ -303,6 +315,7 @@ fn build_s3_operator(config: S3StorageConfig) -> Result<Operator> {
 
 #[cfg(test)]
 mod tests {
+    use futures::future;
     use slatedb::WriteBatch;
     use tempfile::tempdir;
 
@@ -457,6 +470,85 @@ mod tests {
         drop(reopened);
 
         fs.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn closed_filesystem_errors_report_the_failing_method() {
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
+        fs.close().await.expect("close");
+
+        let opened = fs
+            .open_file("database.db", FileOpenFlags::read_only())
+            .await
+            .expect_err("open on a closed filesystem");
+        let existed = fs
+            .file_exists("database.db")
+            .await
+            .expect_err("lookup on a closed filesystem");
+
+        // Passing `closed` through ok_or_else would lose the original call sites.
+        assert_ne!(location(&opened), location(&existed));
+    }
+
+    fn location(error: &Error) -> String {
+        match error {
+            Error::InvalidArgument(inner) => inner.location.clone().expect("recorded call site"),
+            other => panic!("expected a closed-filesystem error, got {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_syncs_persist_each_file() {
+        const SYNCS: u64 = 4;
+
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
+
+        let mut handles = Vec::new();
+        for index in 0..SYNCS {
+            let mut handle = fs
+                .open_file(&format!("wal-{index}.db"), FileOpenFlags::open_or_create())
+                .await
+                .expect("create file");
+            handle
+                .write(contents(index).as_bytes())
+                .await
+                .expect("write file");
+            handles.push(handle);
+        }
+
+        let syncs = handles.iter_mut().map(FileHandle::sync).collect::<Vec<_>>();
+        for result in future::join_all(syncs).await {
+            result.expect("sync");
+        }
+
+        for mut handle in handles {
+            handle.close().await.expect("close file");
+        }
+
+        for index in 0..SYNCS {
+            let expected = contents(index);
+            let mut reopened = fs
+                .open_file(&format!("wal-{index}.db"), FileOpenFlags::read_only())
+                .await
+                .expect("reopen file");
+            let mut actual = vec![0; expected.len()];
+            assert_eq!(
+                reopened.read(&mut actual).await.expect("read back"),
+                expected.len()
+            );
+            assert_eq!(actual, expected.as_bytes());
+            reopened.close().await.expect("close reopened file");
+        }
+
+        fs.close().await.expect("close");
+    }
+
+    fn contents(index: u64) -> String {
+        format!("contents of wal {index}")
     }
 
     #[tokio::test]

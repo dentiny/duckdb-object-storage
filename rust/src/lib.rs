@@ -11,6 +11,7 @@ mod ffi;
 mod file_handle;
 mod file_metadata;
 mod flags;
+mod flush_batcher;
 mod fs;
 mod io_metrics;
 mod keys;
