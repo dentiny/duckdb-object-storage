@@ -22,7 +22,8 @@ DUCKDB_TEST_TARGETS := test_debug_duckdb test_reldebug_duckdb test_release_duckd
 DUCKDB_TEST_CONFIG_ARGS := [memory] [disk]
 DUCKDB_TEST_ARGUMENTS := $(filter-out $(DUCKDB_TEST_TARGETS),$(MAKECMDGOALS))
 DUCKDB_TEST_FILTER ?= $(filter-out $(DUCKDB_TEST_CONFIG_ARGS),$(DUCKDB_TEST_ARGUMENTS))
-DUCKDB_TEST_CONFIG ?= $(if $(filter [memory],$(DUCKDB_TEST_ARGUMENTS)),test/configs/duckdb_slatedb_memory.json,test/configs/duckdb_slatedb.json)
+DUCKDB_TEST_DEFAULT_CONFIG := test/configs/duckdb_slatedb.json
+DUCKDB_TEST_CONFIG ?= $(if $(filter [memory],$(DUCKDB_TEST_ARGUMENTS)),test/configs/duckdb_slatedb_memory.json,$(if $(filter [disk],$(DUCKDB_TEST_ARGUMENTS)),test/configs/duckdb_slatedb_disk.json,$(DUCKDB_TEST_DEFAULT_CONFIG)))
 ifneq ($(filter $(DUCKDB_TEST_TARGETS),$(MAKECMDGOALS)),)
 ifneq ($(word 2,$(filter $(DUCKDB_TEST_CONFIG_ARGS),$(DUCKDB_TEST_ARGUMENTS))),)
 $(error Specify only one DuckDB test config: "[memory]" or "[disk]")
