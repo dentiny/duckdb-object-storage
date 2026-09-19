@@ -145,12 +145,12 @@ Query cumulative OpenDAL I/O statistics after the filesystem is initialized:
 SELECT * FROM duckdb_objfs_io_stats();
 ```
 
-The function returns one row each for `read` and `write`, with
-`request_count`, `average_latency_ms`, and `stddev_latency_ms`. Standard
-deviation is calculated over the complete observed population. Read latency
-covers the data read, and write latency runs until the writer is closed,
-aborted, or dropped. The function returns no rows before the first
-`duckdb_objfs://` access.
+The function returns one row each for `read`, `write`, `stat`, `delete`, and
+`list`, with `request_count`, `average_latency_ms`, and `stddev_latency_ms`.
+Standard deviation is calculated over the complete observed population.
+Streaming read and list latency runs until the stream finishes or is dropped;
+write and delete latency runs until the operation is closed or dropped. The
+function returns no rows before the first `duckdb_objfs://` access.
 
 ## Path semantics
 

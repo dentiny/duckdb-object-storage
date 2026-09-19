@@ -28,12 +28,18 @@ SELECT sum(i) FROM io_db.items
 
 query TTTT rowsort
 SELECT operation,
-       (request_count > 0)::VARCHAR,
+       (CASE WHEN operation IN ('read', 'write')
+             THEN request_count > 0
+             ELSE request_count >= 0
+        END)::VARCHAR,
        (average_latency_ms >= 0)::VARCHAR,
        (stddev_latency_ms >= 0)::VARCHAR
 FROM duckdb_objfs_io_stats()
 ----
+delete	true	true	true
+list	true	true	true
 read	true	true	true
+stat	true	true	true
 write	true	true	true
 
 statement ok

@@ -48,8 +48,8 @@ impl Debug for IoMetricsService {
 impl Service for IoMetricsService {
     type Reader = IoMetricsReader;
     type Writer = IoMetricsWriter;
-    type Lister = oio::Lister;
-    type Deleter = oio::Deleter;
+    type Lister = IoMetricsLister;
+    type Deleter = IoMetricsDeleter;
     type Copier = oio::Copier;
     type Composer = oio::Composer;
 
@@ -71,7 +71,10 @@ impl Service for IoMetricsService {
     }
 
     async fn stat(&self, context: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
-        self.inner.stat(context, path, args).await
+        let start = Instant::now();
+        let result = self.inner.stat(context, path, args).await;
+        self.metrics.record_stat(start.elapsed());
+        result
     }
 
     fn read(&self, context: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
@@ -105,11 +108,35 @@ impl Service for IoMetricsService {
     }
 
     fn delete(&self, context: &OperationContext) -> Result<Self::Deleter> {
-        self.inner.delete(context)
+        let start = Instant::now();
+        match self.inner.delete(context) {
+            Ok(inner) => Ok(IoMetricsDeleter {
+                inner,
+                metrics: Arc::clone(&self.metrics),
+                start,
+                recorded: false,
+            }),
+            Err(error) => {
+                self.metrics.record_delete(start.elapsed());
+                Err(error)
+            }
+        }
     }
 
     fn list(&self, context: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
-        self.inner.list(context, path, args)
+        let start = Instant::now();
+        match self.inner.list(context, path, args) {
+            Ok(inner) => Ok(IoMetricsLister {
+                inner,
+                metrics: Arc::clone(&self.metrics),
+                start,
+                recorded: false,
+            }),
+            Err(error) => {
+                self.metrics.record_list(start.elapsed());
+                Err(error)
+            }
+        }
     }
 
     fn copy(
@@ -269,6 +296,72 @@ impl oio::Write for IoMetricsWriter {
     }
 }
 
+struct IoMetricsDeleter {
+    inner: oio::Deleter,
+    metrics: Arc<IoMetrics>,
+    start: Instant,
+    recorded: bool,
+}
+
+impl IoMetricsDeleter {
+    fn record_once(&mut self) {
+        if !self.recorded {
+            self.metrics.record_delete(self.start.elapsed());
+            self.recorded = true;
+        }
+    }
+}
+
+impl Drop for IoMetricsDeleter {
+    fn drop(&mut self) {
+        self.record_once();
+    }
+}
+
+impl oio::Delete for IoMetricsDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
+        self.inner.delete(path, args).await
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        let result = self.inner.close().await;
+        self.record_once();
+        result
+    }
+}
+
+struct IoMetricsLister {
+    inner: oio::Lister,
+    metrics: Arc<IoMetrics>,
+    start: Instant,
+    recorded: bool,
+}
+
+impl IoMetricsLister {
+    fn record_once(&mut self) {
+        if !self.recorded {
+            self.metrics.record_list(self.start.elapsed());
+            self.recorded = true;
+        }
+    }
+}
+
+impl Drop for IoMetricsLister {
+    fn drop(&mut self) {
+        self.record_once();
+    }
+}
+
+impl oio::List for IoMetricsLister {
+    async fn next(&mut self) -> Result<Option<oio::Entry>> {
+        let result = self.inner.next().await;
+        if !matches!(&result, Ok(Some(_))) {
+            self.record_once();
+        }
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,7 +369,7 @@ mod tests {
     use opendal::Operator;
 
     #[tokio::test]
-    async fn records_read_and_write_metrics() {
+    async fn records_supported_operation_metrics() {
         let metrics = Arc::new(IoMetrics::default());
         let operator = Operator::new(Memory::default())
             .expect("memory operator")
@@ -287,11 +380,15 @@ mod tests {
             .await
             .expect("write");
         operator.read("metrics-test").await.expect("read");
+        operator.stat("metrics-test").await.expect("stat");
+        operator.list("/").await.expect("list");
+        operator.delete("metrics-test").await.expect("delete");
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.write.request_count, 1);
         assert_eq!(snapshot.read.request_count, 1);
-        assert!(snapshot.write.average_latency >= std::time::Duration::ZERO);
-        assert!(snapshot.read.average_latency >= std::time::Duration::ZERO);
+        assert_eq!(snapshot.stat.request_count, 1);
+        assert_eq!(snapshot.list.request_count, 1);
+        assert_eq!(snapshot.delete.request_count, 1);
     }
 }
