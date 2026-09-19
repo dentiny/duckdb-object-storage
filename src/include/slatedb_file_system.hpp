@@ -8,6 +8,8 @@
 
 namespace duckdb {
 
+struct CacheInitializationConfig;
+
 struct SlateDBFsDeleter {
 	void operator()(slatedb_fs *ptr) const;
 };
@@ -48,9 +50,9 @@ public:
 
 private:
 	void EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> opener);
-	void InitializeMemory();
-	void InitializeLocal(const string &root);
-	void InitializeS3(optional_ptr<FileOpener> opener);
+	void InitializeMemory(const CacheInitializationConfig &cache);
+	void InitializeLocal(const string &root, const CacheInitializationConfig &cache);
+	void InitializeS3(optional_ptr<FileOpener> opener, const CacheInitializationConfig &cache);
 	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener);
 
 	mutex initialization_lock;
