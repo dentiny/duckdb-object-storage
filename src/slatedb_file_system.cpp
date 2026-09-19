@@ -37,6 +37,24 @@ size_t CheckedSize(int64_t size, const string &operation) {
 	return NumericCast<size_t>(size);
 }
 
+slatedb_cache_config ConvertCacheConfig(const CacheInitializationConfig &config) {
+	int32_t preload = SLATEDB_PERSISTENT_CACHE_PRELOAD_NONE;
+	if (config.persistent_cache_preload == "l0") {
+		preload = SLATEDB_PERSISTENT_CACHE_PRELOAD_L0;
+	} else if (config.persistent_cache_preload == "all") {
+		preload = SLATEDB_PERSISTENT_CACHE_PRELOAD_ALL;
+	}
+	return {config.block_cache_size_bytes,
+	        config.metadata_cache_size_bytes,
+	        config.foyer_shards,
+	        config.persistent_cache_path.c_str(),
+	        config.persistent_cache_size_bytes,
+	        config.persistent_cache_part_size_bytes,
+	        config.persistent_cache_on_flush,
+	        config.persistent_cache_on_compaction,
+	        preload};
+}
+
 } // namespace
 
 void SlateDBFsDeleter::operator()(slatedb_fs *ptr) const {
@@ -50,37 +68,40 @@ SlateDBFileSystem::SlateDBFileSystem() {
 
 unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateInMemory() {
 	auto result = make_uniq<SlateDBFileSystem>();
-	result->InitializeMemory();
+	result->InitializeMemory(CacheInitializationConfig());
 	return result;
 }
 
 unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocal(const string &root) {
 	auto result = make_uniq<SlateDBFileSystem>();
-	result->InitializeLocal(root);
+	result->InitializeLocal(root, CacheInitializationConfig());
 	return result;
 }
 
-void SlateDBFileSystem::InitializeMemory() {
+void SlateDBFileSystem::InitializeMemory(const CacheInitializationConfig &cache) {
 	slatedb_fs *ptr = nullptr;
-	ThrowSlateDBError(slatedb_fs_create_memory(&ptr), "initialize in-memory SlateDB filesystem");
+	auto ffi_cache = ConvertCacheConfig(cache);
+	ThrowSlateDBError(slatedb_fs_create_memory(&ffi_cache, &ptr), "initialize in-memory SlateDB filesystem");
 	impl.reset(ptr);
 }
 
-void SlateDBFileSystem::InitializeLocal(const string &root) {
+void SlateDBFileSystem::InitializeLocal(const string &root, const CacheInitializationConfig &cache) {
 	slatedb_fs *ptr = nullptr;
-	ThrowSlateDBError(slatedb_fs_create_local(root.c_str(), &ptr), "initialize local SlateDB filesystem");
+	auto ffi_cache = ConvertCacheConfig(cache);
+	ThrowSlateDBError(slatedb_fs_create_local(root.c_str(), &ffi_cache, &ptr), "initialize local SlateDB filesystem");
 	impl.reset(ptr);
 }
 
-void SlateDBFileSystem::InitializeS3(optional_ptr<FileOpener> opener) {
+void SlateDBFileSystem::InitializeS3(optional_ptr<FileOpener> opener, const CacheInitializationConfig &cache) {
 	auto config = ReadS3InitializationConfig(opener);
 	slatedb_s3_config ffi_config {
 	    config.bucket.c_str(),        config.root.c_str(),   config.endpoint.c_str(),
 	    config.region.c_str(),        config.key_id.c_str(), config.secret.c_str(),
 	    config.session_token.c_str(), config.use_ssl,        config.virtual_host_style,
 	};
+	auto ffi_cache = ConvertCacheConfig(cache);
 	slatedb_fs *ptr = nullptr;
-	ThrowSlateDBError(slatedb_fs_create_s3(&ffi_config, &ptr), "initialize S3-backed SlateDB filesystem");
+	ThrowSlateDBError(slatedb_fs_create_s3(&ffi_config, &ffi_cache, &ptr), "initialize S3-backed SlateDB filesystem");
 	impl.reset(ptr);
 }
 
@@ -114,16 +135,17 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 		backend = "local";
 	}
 	backend = StringUtil::Lower(backend);
+	auto cache = ReadCacheInitializationConfig(opener);
 	if (backend == "memory") {
-		InitializeMemory();
+		InitializeMemory(cache);
 	} else if (backend == "local") {
 		auto local_path = GetOptionalSetting(opener, "duckdb_objfs_root");
 		if (local_path.empty()) {
 			local_path = ".duckdb_objfs";
 		}
-		InitializeLocal(local_path);
+		InitializeLocal(local_path, cache);
 	} else if (backend == "s3") {
-		InitializeS3(opener);
+		InitializeS3(opener, cache);
 	} else {
 		throw InvalidConfigurationException("Unsupported duckdb_objfs backend '%s'; expected s3, local, or memory",
 		                                    backend);

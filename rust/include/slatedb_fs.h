@@ -30,6 +30,24 @@ typedef struct slatedb_s3_config {
 	int32_t virtual_host_style;
 } slatedb_s3_config;
 
+typedef enum slatedb_persistent_cache_preload {
+	SLATEDB_PERSISTENT_CACHE_PRELOAD_NONE = 0,
+	SLATEDB_PERSISTENT_CACHE_PRELOAD_L0 = 1,
+	SLATEDB_PERSISTENT_CACHE_PRELOAD_ALL = 2,
+} slatedb_persistent_cache_preload;
+
+typedef struct slatedb_cache_config {
+	uint64_t block_cache_size_bytes;
+	uint64_t metadata_cache_size_bytes;
+	uint64_t foyer_shards;
+	const char *persistent_cache_path;
+	uint64_t persistent_cache_size_bytes;
+	uint64_t persistent_cache_part_size_bytes;
+	int32_t persistent_cache_on_flush;
+	int32_t persistent_cache_on_compaction;
+	int32_t persistent_cache_preload;
+} slatedb_cache_config;
+
 typedef enum slatedb_fs_error_code {
 	SLATEDB_FS_ERROR_NONE = 0,
 	SLATEDB_FS_ERROR_METADATA_DECODE = 1,
@@ -41,9 +59,10 @@ typedef enum slatedb_fs_error_code {
 	SLATEDB_FS_ERROR_IO = 7,
 } slatedb_fs_error_code;
 
-int32_t slatedb_fs_create_memory(slatedb_fs **output);
-int32_t slatedb_fs_create_local(const char *root, slatedb_fs **output);
-int32_t slatedb_fs_create_s3(const slatedb_s3_config *config, slatedb_fs **output);
+int32_t slatedb_fs_create_memory(const slatedb_cache_config *cache, slatedb_fs **output);
+int32_t slatedb_fs_create_local(const char *root, const slatedb_cache_config *cache, slatedb_fs **output);
+int32_t slatedb_fs_create_s3(const slatedb_s3_config *config, const slatedb_cache_config *cache,
+                             slatedb_fs **output);
 void slatedb_fs_destroy(slatedb_fs *fs);
 
 // Operations return zero on success and a stable error code on failure.

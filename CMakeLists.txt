@@ -29,6 +29,7 @@ if(APPLE)
       System
       resolv
       "-framework CoreFoundation"
+      "-framework IOKit"
       "-framework SystemConfiguration"
       "-framework Security")
 elseif(UNIX)

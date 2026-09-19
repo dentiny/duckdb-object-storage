@@ -26,6 +26,15 @@ string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name) {
 	return value.GetValue<string>();
 }
 
+template <class T>
+T GetSettingOrDefault(optional_ptr<FileOpener> opener, const string &name, T default_value) {
+	Value value;
+	if (!FileOpener::TryGetCurrentSetting(opener, name, value) || value.IsNull()) {
+		return default_value;
+	}
+	return value.GetValue<T>();
+}
+
 S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener) {
 	if (!opener) {
 		throw InvalidConfigurationException("Cannot initialize object storage without a FileOpener");
@@ -61,6 +70,31 @@ S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opene
 		throw InvalidConfigurationException("S3 secret url_style must be either 'path' or 'vhost'");
 	}
 	result.virtual_host_style = url_style == "vhost";
+	return result;
+}
+
+CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener> opener) {
+	CacheInitializationConfig result;
+	result.block_cache_size_bytes =
+	    GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_memory_cache_size", result.block_cache_size_bytes);
+	result.metadata_cache_size_bytes =
+	    GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_metadata_cache_size", result.metadata_cache_size_bytes);
+	result.foyer_shards = GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_foyer_shards", result.foyer_shards);
+	result.persistent_cache_path = GetOptionalSetting(opener, "duckdb_objfs_persistent_cache_path");
+	result.persistent_cache_size_bytes =
+	    GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_persistent_cache_size", result.persistent_cache_size_bytes);
+	result.persistent_cache_part_size_bytes = GetSettingOrDefault<uint64_t>(
+	    opener, "duckdb_objfs_persistent_cache_part_size", result.persistent_cache_part_size_bytes);
+	result.persistent_cache_on_flush =
+	    GetSettingOrDefault<bool>(opener, "duckdb_objfs_persistent_cache_on_flush", result.persistent_cache_on_flush);
+	result.persistent_cache_on_compaction = GetSettingOrDefault<bool>(
+	    opener, "duckdb_objfs_persistent_cache_on_compaction", result.persistent_cache_on_compaction);
+	result.persistent_cache_preload =
+	    StringUtil::Lower(GetSettingOrDefault<string>(opener, "duckdb_objfs_persistent_cache_preload", "none"));
+	if (result.persistent_cache_preload != "none" && result.persistent_cache_preload != "l0" &&
+	    result.persistent_cache_preload != "all") {
+		throw InvalidConfigurationException("duckdb_objfs_persistent_cache_preload must be one of: none, l0, all");
+	}
 	return result;
 }
 

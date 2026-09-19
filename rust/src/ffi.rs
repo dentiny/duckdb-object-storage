@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::{FileHandle, SlateFileHandle};
 use crate::flags::FileOpenFlags;
-use crate::fs::{S3StorageConfig, SlateDbFileSystem};
+use crate::fs::{CacheConfig, PersistentCachePreload, S3StorageConfig, SlateDbFileSystem};
 
 const DATABASE_PATH: &str = "duckdb-object-storage";
 
@@ -36,6 +36,19 @@ pub struct FfiS3Config {
     session_token: *const c_char,
     use_ssl: i32,
     virtual_host_style: i32,
+}
+
+#[repr(C)]
+pub struct FfiCacheConfig {
+    block_cache_size_bytes: u64,
+    metadata_cache_size_bytes: u64,
+    foyer_shards: u64,
+    persistent_cache_path: *const c_char,
+    persistent_cache_size_bytes: u64,
+    persistent_cache_part_size_bytes: u64,
+    persistent_cache_on_flush: i32,
+    persistent_cache_on_compaction: i32,
+    persistent_cache_preload: i32,
 }
 
 /// Synchronous FFI context owning the one async runtime used by this
@@ -132,6 +145,60 @@ unsafe fn require_s3_config(config: *const FfiS3Config) -> Result<S3StorageConfi
     })
 }
 
+unsafe fn cache_config(config: *const FfiCacheConfig) -> Result<CacheConfig> {
+    let Some(config) = (unsafe { config.as_ref() }) else {
+        return Ok(CacheConfig::default());
+    };
+    let persistent_cache_path =
+        unsafe { optional_string(config.persistent_cache_path, "persistent cache path")? }
+            .map(Into::into);
+    let persistent_cache_size_bytes = usize::try_from(config.persistent_cache_size_bytes)
+        .map_err(|_| invalid_argument("persistent cache size does not fit this platform"))?;
+    let persistent_cache_part_size_bytes = usize::try_from(config.persistent_cache_part_size_bytes)
+        .map_err(|_| invalid_argument("persistent cache part size does not fit this platform"))?;
+    if persistent_cache_path.is_some() {
+        if persistent_cache_size_bytes == 0 {
+            return Err(invalid_argument(
+                "persistent cache size must be greater than zero",
+            ));
+        }
+        if persistent_cache_part_size_bytes == 0 || persistent_cache_part_size_bytes % 1024 != 0 {
+            return Err(invalid_argument(
+                "persistent cache part size must be a non-zero multiple of 1024 bytes",
+            ));
+        }
+    }
+    let foyer_shards = match config.foyer_shards {
+        0 => None,
+        value => Some(
+            usize::try_from(value)
+                .map_err(|_| invalid_argument("Foyer shard count does not fit this platform"))?,
+        ),
+    };
+    let persistent_cache_preload = match config.persistent_cache_preload {
+        0 => None,
+        1 => Some(PersistentCachePreload::L0),
+        2 => Some(PersistentCachePreload::All),
+        value => {
+            return Err(invalid_argument(format!(
+                "invalid persistent cache preload value: {value}"
+            )))
+        }
+    };
+
+    Ok(CacheConfig {
+        block_cache_size_bytes: config.block_cache_size_bytes,
+        metadata_cache_size_bytes: config.metadata_cache_size_bytes,
+        foyer_shards,
+        persistent_cache_path,
+        persistent_cache_size_bytes,
+        persistent_cache_part_size_bytes,
+        persistent_cache_on_flush: config.persistent_cache_on_flush != 0,
+        persistent_cache_on_compaction: config.persistent_cache_on_compaction != 0,
+        persistent_cache_preload,
+    })
+}
+
 unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlags> {
     let options = unsafe { options.as_ref() }
         .ok_or_else(|| invalid_argument("open options must not be null"))?;
@@ -205,12 +272,19 @@ fn create_runtime() -> Result<Arc<Runtime>> {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn slatedb_fs_create_memory(output: *mut *mut FfiFileSystem) -> i32 {
+pub unsafe extern "C" fn slatedb_fs_create_memory(
+    cache: *const FfiCacheConfig,
+    output: *mut *mut FfiFileSystem,
+) -> i32 {
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
+        let cache = unsafe { cache_config(cache)? };
         let runtime = create_runtime()?;
-        let fs = runtime.block_on(SlateDbFileSystem::open_in_memory(DATABASE_PATH))?;
+        let fs = runtime.block_on(SlateDbFileSystem::open_in_memory_with_cache_config(
+            DATABASE_PATH,
+            cache,
+        ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
     })
@@ -219,6 +293,7 @@ pub unsafe extern "C" fn slatedb_fs_create_memory(output: *mut *mut FfiFileSyste
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_fs_create_local(
     root: *const c_char,
+    cache: *const FfiCacheConfig,
     output: *mut *mut FfiFileSystem,
 ) -> i32 {
     ffi_result(|| {
@@ -228,8 +303,13 @@ pub unsafe extern "C" fn slatedb_fs_create_local(
         if root.is_empty() {
             return Err(invalid_argument("local root must not be empty"));
         }
+        let cache = unsafe { cache_config(cache)? };
         let runtime = create_runtime()?;
-        let fs = runtime.block_on(SlateDbFileSystem::open_local(DATABASE_PATH, root))?;
+        let fs = runtime.block_on(SlateDbFileSystem::open_local_with_cache_config(
+            DATABASE_PATH,
+            root,
+            cache,
+        ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
     })
@@ -238,14 +318,20 @@ pub unsafe extern "C" fn slatedb_fs_create_local(
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_fs_create_s3(
     config: *const FfiS3Config,
+    cache: *const FfiCacheConfig,
     output: *mut *mut FfiFileSystem,
 ) -> i32 {
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
         let config = unsafe { require_s3_config(config)? };
+        let cache = unsafe { cache_config(cache)? };
         let runtime = create_runtime()?;
-        let fs = runtime.block_on(SlateDbFileSystem::open_s3(DATABASE_PATH, config))?;
+        let fs = runtime.block_on(SlateDbFileSystem::open_s3_with_cache_config(
+            DATABASE_PATH,
+            config,
+            cache,
+        ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
     })
@@ -546,7 +632,7 @@ mod tests {
 
     unsafe fn create_fs() -> *mut FfiFileSystem {
         let mut fs = ptr::null_mut();
-        expect_ok(slatedb_fs_create_memory(&mut fs));
+        expect_ok(slatedb_fs_create_memory(ptr::null(), &mut fs));
         assert!(!fs.is_null());
         fs
     }
@@ -595,7 +681,7 @@ mod tests {
             let mut fs = ptr::null_mut();
 
             assert_eq!(
-                slatedb_fs_create_s3(&config, &mut fs),
+                slatedb_fs_create_s3(&config, ptr::null(), &mut fs),
                 crate::error::ErrorCode::InvalidArgument as i32
             );
             assert!(fs.is_null());
@@ -610,14 +696,14 @@ mod tests {
             let empty = CString::new("").unwrap();
             let mut fs = ptr::null_mut();
             assert_eq!(
-                slatedb_fs_create_local(empty.as_ptr(), &mut fs),
+                slatedb_fs_create_local(empty.as_ptr(), ptr::null(), &mut fs),
                 crate::error::ErrorCode::InvalidArgument as i32
             );
             assert!(fs.is_null());
 
             let root = tempfile::tempdir().expect("temporary local root");
             let root = CString::new(root.path().to_str().expect("UTF-8 local root")).unwrap();
-            expect_ok(slatedb_fs_create_local(root.as_ptr(), &mut fs));
+            expect_ok(slatedb_fs_create_local(root.as_ptr(), ptr::null(), &mut fs));
             assert!(!fs.is_null());
             slatedb_fs_destroy(fs);
         }

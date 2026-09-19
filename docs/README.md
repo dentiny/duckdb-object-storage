@@ -73,6 +73,36 @@ CREATE OR REPLACE SECRET duckdb_objfs_s3 (
 Credentials, session tokens, regions, endpoints, and URL style come from the
 scope-matching S3 secret. They are not stored in extension settings.
 
+## Cache configuration
+
+The extension enables SlateDB's Foyer in-memory cache by default. Data blocks
+use up to 512 MiB and SST metadata uses up to 128 MiB. These limits are
+independent of DuckDB's buffer-manager memory limit:
+
+```sql
+SET duckdb_objfs_memory_cache_size = 268435456;   -- 256 MiB
+SET duckdb_objfs_metadata_cache_size = 67108864; -- 64 MiB
+SET duckdb_objfs_foyer_shards = 0;                -- automatic
+```
+
+Set either cache size to zero to disable that part of the in-memory cache.
+
+The persistent local SST cache is disabled by default. Set a local path to
+enable it, which is most useful with the S3 backend:
+
+```sql
+SET duckdb_objfs_persistent_cache_path = '/var/cache/duckdb-objfs';
+SET duckdb_objfs_persistent_cache_size = 17179869184;     -- 16 GiB
+SET duckdb_objfs_persistent_cache_part_size = 4194304;    -- 4 MiB
+SET duckdb_objfs_persistent_cache_preload = 'l0';         -- none, l0, or all
+SET duckdb_objfs_persistent_cache_on_flush = false;
+SET duckdb_objfs_persistent_cache_on_compaction = false;
+```
+
+The part size must be a non-zero multiple of 1024 bytes. Cache settings are
+read when the filesystem is initialized, so configure them before the first
+`duckdb_objfs://` access.
+
 ## Path semantics
 
 `duckdb_objfs://` paths identify logical DuckDB files:

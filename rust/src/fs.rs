@@ -3,6 +3,9 @@ use std::sync::Arc;
 use object_store_opendal::OpendalStore;
 use opendal::services::{Fs, Memory, S3};
 use opendal::Operator;
+use slatedb::config::{PreloadLevel, Settings};
+use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
+use slatedb::db_cache::{DbCache, SplitCache};
 use slatedb::Db;
 
 use crate::database_metadata::DatabaseMetadata;
@@ -37,9 +40,52 @@ pub struct S3StorageConfig {
     pub virtual_host_style: bool,
 }
 
+#[derive(Clone, Copy)]
+pub enum PersistentCachePreload {
+    L0,
+    All,
+}
+
+#[derive(Clone)]
+pub struct CacheConfig {
+    pub block_cache_size_bytes: u64,
+    pub metadata_cache_size_bytes: u64,
+    pub foyer_shards: Option<usize>,
+    pub persistent_cache_path: Option<std::path::PathBuf>,
+    pub persistent_cache_size_bytes: usize,
+    pub persistent_cache_part_size_bytes: usize,
+    pub persistent_cache_on_flush: bool,
+    pub persistent_cache_on_compaction: bool,
+    pub persistent_cache_preload: Option<PersistentCachePreload>,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            block_cache_size_bytes: slatedb::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
+            metadata_cache_size_bytes: slatedb::db_cache::DEFAULT_META_CACHE_CAPACITY,
+            foyer_shards: None,
+            persistent_cache_path: None,
+            persistent_cache_size_bytes: 16 * 1024 * 1024 * 1024,
+            persistent_cache_part_size_bytes: 4 * 1024 * 1024,
+            persistent_cache_on_flush: false,
+            persistent_cache_on_compaction: false,
+            persistent_cache_preload: None,
+        }
+    }
+}
+
 impl SlateDbFileSystem {
     /// Opens SlateDB on top of an OpenDAL storage operator.
     pub async fn open(database_path: &str, operator: Operator) -> Result<Self> {
+        Self::open_with_cache_config(database_path, operator, CacheConfig::default()).await
+    }
+
+    pub async fn open_with_cache_config(
+        database_path: &str,
+        operator: Operator,
+        cache_config: CacheConfig,
+    ) -> Result<Self> {
         if database_path.is_empty() {
             return Err(Error::InvalidArgument(ErrorStruct::new(
                 "database path must not be empty".to_string(),
@@ -48,7 +94,47 @@ impl SlateDbFileSystem {
         }
 
         let object_store = Arc::new(OpendalStore::new(operator));
-        let db = Db::open(database_path, object_store).await?;
+        let mut settings = Settings::default();
+        if let Some(path) = cache_config.persistent_cache_path {
+            settings.object_store_cache_options.root_folder = Some(path);
+            settings.object_store_cache_options.max_cache_size_bytes =
+                Some(cache_config.persistent_cache_size_bytes);
+            settings.object_store_cache_options.part_size_bytes =
+                cache_config.persistent_cache_part_size_bytes;
+            settings.object_store_cache_options.cache_on_flush =
+                cache_config.persistent_cache_on_flush;
+            settings.object_store_cache_options.cache_on_compaction =
+                cache_config.persistent_cache_on_compaction;
+            settings
+                .object_store_cache_options
+                .preload_disk_cache_on_startup =
+                cache_config
+                    .persistent_cache_preload
+                    .map(|level| match level {
+                        PersistentCachePreload::L0 => PreloadLevel::L0Sst,
+                        PersistentCachePreload::All => PreloadLevel::AllSst,
+                    });
+        }
+
+        let mut builder = Db::builder(database_path, object_store).with_settings(settings);
+        if cache_config.block_cache_size_bytes == 0 && cache_config.metadata_cache_size_bytes == 0 {
+            builder = builder.with_db_cache_disabled();
+        } else {
+            let block_cache = build_foyer_cache(
+                cache_config.block_cache_size_bytes,
+                cache_config.foyer_shards,
+            );
+            let metadata_cache = build_foyer_cache(
+                cache_config.metadata_cache_size_bytes,
+                cache_config.foyer_shards,
+            );
+            let cache = SplitCache::new()
+                .with_block_cache(block_cache)
+                .with_meta_cache(metadata_cache)
+                .build();
+            builder = builder.with_db_cache(Arc::new(cache));
+        }
+        let db = builder.build().await?;
         Ok(Self {
             db: Some(Arc::new(db)),
         })
@@ -59,7 +145,23 @@ impl SlateDbFileSystem {
         Self::open(database_path, operator).await
     }
 
+    pub async fn open_s3_with_cache_config(
+        database_path: &str,
+        config: S3StorageConfig,
+        cache_config: CacheConfig,
+    ) -> Result<Self> {
+        let operator = build_s3_operator(config)?;
+        Self::open_with_cache_config(database_path, operator, cache_config).await
+    }
+
     pub async fn open_in_memory(database_path: &str) -> Result<Self> {
+        Self::open_in_memory_with_cache_config(database_path, CacheConfig::default()).await
+    }
+
+    pub async fn open_in_memory_with_cache_config(
+        database_path: &str,
+        cache_config: CacheConfig,
+    ) -> Result<Self> {
         let operator = Operator::new(Memory::default()).map_err(|source| {
             Error::Io(
                 ErrorStruct::new(
@@ -69,12 +171,20 @@ impl SlateDbFileSystem {
                 .with_source(source),
             )
         })?;
-        Self::open(database_path, operator).await
+        Self::open_with_cache_config(database_path, operator, cache_config).await
     }
 
     pub async fn open_local(
         database_path: &str,
         root: impl AsRef<std::path::Path>,
+    ) -> Result<Self> {
+        Self::open_local_with_cache_config(database_path, root, CacheConfig::default()).await
+    }
+
+    pub async fn open_local_with_cache_config(
+        database_path: &str,
+        root: impl AsRef<std::path::Path>,
+        cache_config: CacheConfig,
     ) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let root_str = root.to_str().ok_or_else(|| {
@@ -94,7 +204,7 @@ impl SlateDbFileSystem {
                 .with_source(source),
             )
         })?;
-        Self::open(database_path, operator).await
+        Self::open_with_cache_config(database_path, operator, cache_config).await
     }
 
     /// Open a logical file, creating its persistent catalog entry when allowed.
@@ -170,6 +280,20 @@ impl SlateDbFileSystem {
     pub fn can_handle(&self, path: &str) -> bool {
         path.starts_with(PREFIX)
     }
+}
+
+fn build_foyer_cache(max_capacity: u64, shards: Option<usize>) -> Option<Arc<dyn DbCache>> {
+    if max_capacity == 0 {
+        return None;
+    }
+    let mut options = FoyerCacheOptions {
+        max_capacity,
+        ..Default::default()
+    };
+    if let Some(shards) = shards {
+        options.shards = shards;
+    }
+    Some(Arc::new(FoyerCache::new_with_opts(options)))
 }
 
 fn build_s3_operator(config: S3StorageConfig) -> Result<Operator> {
