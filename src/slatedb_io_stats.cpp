@@ -94,6 +94,7 @@ void IoStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &outp
 			average_ms = state.stats.delete_average_latency_ms;
 			stddev_ms = state.stats.delete_stddev_latency_ms;
 		} else {
+			D_ASSERT(state.offset == 4);
 			operation = "list";
 			request_count = state.stats.list_request_count;
 			average_ms = state.stats.list_average_latency_ms;
