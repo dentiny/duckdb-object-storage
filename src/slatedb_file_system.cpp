@@ -146,6 +146,15 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 	return impl.get();
 }
 
+bool SlateDBFileSystem::TryGetCacheStats(slatedb_cache_stats &stats) {
+	lock_guard<mutex> guard(initialization_lock);
+	if (!impl) {
+		return false;
+	}
+	ThrowSlateDBError(slatedb_fs_get_cache_stats(impl.get(), &stats), "get SlateDB cache statistics");
+	return true;
+}
+
 unique_ptr<FileHandle> SlateDBFileSystem::OpenFile(const string &path, FileOpenFlags flags,
                                                    optional_ptr<FileOpener> opener) {
 	flags.Verify();

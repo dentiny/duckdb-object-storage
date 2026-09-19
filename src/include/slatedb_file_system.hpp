@@ -47,6 +47,7 @@ public:
 	string PathSeparator(const string &path) override;
 	string CanonicalizePath(const string &path, optional_ptr<FileOpener> opener = nullptr) override;
 	std::string GetName() const override;
+	bool TryGetCacheStats(slatedb_cache_stats &stats);
 
 private:
 	void EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> opener);

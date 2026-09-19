@@ -1,0 +1,61 @@
+# name: test/sql/duckdb_object_storage_cache.test
+# description: test duckdb_object_storage cache configuration and statistics
+# group: [sql]
+
+require duckdb_object_storage
+
+# Cache statistics are unavailable until the filesystem has been initialized.
+query I
+SELECT count(*) FROM duckdb_objfs_cache_stats()
+----
+0
+
+# Enable all cache tiers with small, deterministic capacities.
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_cache_backend'
+
+statement ok
+SET duckdb_objfs_memory_cache_size = 1048576
+
+statement ok
+SET duckdb_objfs_metadata_cache_size = 524288
+
+statement ok
+SET duckdb_objfs_persistent_cache_path = '__TEST_DIR__/duckdb_objfs_persistent_cache'
+
+statement ok
+SET duckdb_objfs_persistent_cache_size = 8388608
+
+statement ok
+SET duckdb_objfs_persistent_cache_part_size = 1048576
+
+statement ok
+ATTACH 'duckdb_objfs://cache-test.db' AS cache_db
+
+statement ok
+CREATE TABLE cache_db.items AS SELECT range AS i FROM range(1024)
+
+statement ok
+CHECKPOINT cache_db
+
+query I
+SELECT sum(i) FROM cache_db.items
+----
+523776
+
+query TTTT rowsort
+SELECT cache,
+       (hit_count >= 0 AND miss_count >= 0)::VARCHAR,
+       (hit_rate IS NULL OR hit_rate BETWEEN 0 AND 1)::VARCHAR,
+       (CASE WHEN cache = 'persistent'
+             THEN size_bytes IS NOT NULL
+             ELSE size_bytes IS NULL
+        END)::VARCHAR
+FROM duckdb_objfs_cache_stats()
+----
+memory_data	true	true	true
+memory_metadata	true	true	true
+persistent	true	true	true
+
+statement ok
+DETACH cache_db

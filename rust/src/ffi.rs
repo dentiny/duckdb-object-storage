@@ -8,11 +8,12 @@ use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Runtime;
 
+use crate::cache::CacheConfig;
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::{FileHandle, SlateFileHandle};
 use crate::flags::FileOpenFlags;
-use crate::fs::{CacheConfig, S3StorageConfig, SlateDbFileSystem};
+use crate::fs::{S3StorageConfig, SlateDbFileSystem};
 
 const DATABASE_PATH: &str = "duckdb-object-storage";
 
@@ -70,6 +71,31 @@ pub struct FfiCacheConfig {
     persistent_cache_on_flush: i32,
     /// Whether compaction output should be inserted into the persistent cache.
     persistent_cache_on_compaction: i32,
+}
+
+#[repr(C)]
+#[derive(Default)]
+pub struct FfiCacheStats {
+    /// Successful in-memory data-block cache lookups.
+    block_cache_hits: u64,
+    /// Unsuccessful in-memory data-block cache lookups.
+    block_cache_misses: u64,
+    /// Successful in-memory metadata cache lookups.
+    metadata_cache_hits: u64,
+    /// Unsuccessful in-memory metadata cache lookups.
+    metadata_cache_misses: u64,
+    /// Successful persistent cache part lookups.
+    persistent_cache_hits: u64,
+    /// Unsuccessful persistent cache part lookups.
+    persistent_cache_misses: u64,
+    /// Current number of persistent cache entries.
+    persistent_cache_entries: u64,
+    /// Current persistent cache size.
+    persistent_cache_size_bytes: u64,
+    /// Number of persistent cache entries evicted.
+    persistent_cache_evictions: u64,
+    /// Number of persistent cache bytes evicted.
+    persistent_cache_evicted_bytes: u64,
 }
 
 /// Synchronous FFI context owning the one async runtime used by this
@@ -355,6 +381,31 @@ pub unsafe extern "C" fn slatedb_fs_destroy(fs: *mut FfiFileSystem) {
         let mut fs = unsafe { Box::from_raw(fs) };
         let _ = fs.runtime.block_on(fs.fs.close());
     }));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_fs_get_cache_stats(
+    fs: *const FfiFileSystem,
+    output: *mut FfiCacheStats,
+) -> i32 {
+    ffi_result(|| {
+        let fs = unsafe { require_fs(fs)? };
+        let output = unsafe { require_output(output, "cache stats output")? };
+        let stats = fs.fs.cache_stats();
+        *output = FfiCacheStats {
+            block_cache_hits: stats.block_cache_hits,
+            block_cache_misses: stats.block_cache_misses,
+            metadata_cache_hits: stats.metadata_cache_hits,
+            metadata_cache_misses: stats.metadata_cache_misses,
+            persistent_cache_hits: stats.persistent_cache_hits,
+            persistent_cache_misses: stats.persistent_cache_misses,
+            persistent_cache_entries: stats.persistent_cache_entries,
+            persistent_cache_size_bytes: stats.persistent_cache_size_bytes,
+            persistent_cache_evictions: stats.persistent_cache_evictions,
+            persistent_cache_evicted_bytes: stats.persistent_cache_evicted_bytes,
+        };
+        Ok(())
+    })
 }
 
 #[no_mangle]

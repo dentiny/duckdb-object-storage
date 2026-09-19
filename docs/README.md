@@ -117,6 +117,26 @@ read once when the filesystem is initialized. Configure them before the first
 `duckdb_objfs://` access; changing these settings afterward does not
 reconfigure the running cache.
 
+## Cache statistics
+
+After the first `duckdb_objfs://` access, query cumulative cache statistics
+with:
+
+```sql
+SELECT * FROM duckdb_objfs_cache_stats();
+```
+
+The function returns rows for `memory_data`, `memory_metadata`, and
+`persistent` caches. It reports hit and miss counts and hit rate. The
+persistent row also reports its current entry count, size, and eviction
+totals. Metadata statistics aggregate SlateDB's index, filter, and
+SST-statistics cache entries.
+
+`hit_rate` is `NULL` until a cache has been accessed. In-memory `entry_count`,
+`size_bytes`, and eviction fields are `NULL` because SlateDB's Foyer cache
+adapter does not expose those values. The function returns no rows before the
+filesystem is initialized.
+
 ## Path semantics
 
 `duckdb_objfs://` paths identify logical DuckDB files:

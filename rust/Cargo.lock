@@ -2832,6 +2832,7 @@ dependencies = [
  "prost-build",
  "protoc-bin-vendored",
  "slatedb",
+ "slatedb-common",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

@@ -1,6 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "duckdb_object_storage_extension.hpp"
+#include "slatedb_cache_stats.hpp"
 #include "slatedb_file_system.hpp"
 #include "duckdb/main/database.hpp"
 
@@ -34,7 +35,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("duckdb_objfs_persistent_cache_on_compaction",
 	                          "Populate the persistent cache from compaction output", LogicalType::BOOLEAN,
 	                          Value(false));
-	instance.GetFileSystem().RegisterSubSystem(make_uniq<SlateDBFileSystem>());
+	auto file_system = make_uniq<SlateDBFileSystem>();
+	loader.RegisterFunction(GetSlateDBCacheStatsFunction(*file_system));
+	instance.GetFileSystem().RegisterSubSystem(std::move(file_system));
 }
 
 void DuckdbObjectStorageExtension::Load(ExtensionLoader &loader) {

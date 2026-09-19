@@ -63,6 +63,29 @@ typedef struct slatedb_cache_config {
 	int32_t persistent_cache_on_compaction;
 } slatedb_cache_config;
 
+typedef struct slatedb_cache_stats {
+	// Successful in-memory data-block cache lookups.
+	uint64_t block_cache_hits;
+	// Unsuccessful in-memory data-block cache lookups.
+	uint64_t block_cache_misses;
+	// Successful in-memory metadata cache lookups.
+	uint64_t metadata_cache_hits;
+	// Unsuccessful in-memory metadata cache lookups.
+	uint64_t metadata_cache_misses;
+	// Successful persistent cache part lookups.
+	uint64_t persistent_cache_hits;
+	// Unsuccessful persistent cache part lookups.
+	uint64_t persistent_cache_misses;
+	// Current number of persistent cache entries.
+	uint64_t persistent_cache_entries;
+	// Current persistent cache size.
+	uint64_t persistent_cache_size_bytes;
+	// Number of persistent cache entries evicted.
+	uint64_t persistent_cache_evictions;
+	// Number of persistent cache bytes evicted.
+	uint64_t persistent_cache_evicted_bytes;
+} slatedb_cache_stats;
+
 typedef enum slatedb_fs_error_code {
 	SLATEDB_FS_ERROR_NONE = 0,
 	SLATEDB_FS_ERROR_METADATA_DECODE = 1,
@@ -79,6 +102,7 @@ int32_t slatedb_fs_create_local(const char *root, const slatedb_cache_config *ca
 int32_t slatedb_fs_create_s3(const slatedb_s3_config *config, const slatedb_cache_config *cache_config,
                              slatedb_fs **output);
 void slatedb_fs_destroy(slatedb_fs *fs);
+int32_t slatedb_fs_get_cache_stats(const slatedb_fs *fs, slatedb_cache_stats *output);
 
 // Operations return zero on success and a stable error code on failure.
 // The error message remains valid on the calling thread until its next failure.
