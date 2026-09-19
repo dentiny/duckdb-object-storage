@@ -82,7 +82,7 @@ independent of DuckDB's buffer-manager memory limit:
 ```sql
 SET duckdb_objfs_memory_cache_size = 268435456;   -- 256 MiB
 SET duckdb_objfs_metadata_cache_size = 67108864; -- 64 MiB
-SET duckdb_objfs_foyer_shards = 0;                -- automatic
+SET duckdb_objfs_cache_shards = 0;                -- automatic
 ```
 
 Set either cache size to zero to disable that part of the in-memory cache.

@@ -18,36 +18,59 @@ const DATABASE_PATH: &str = "duckdb-object-storage";
 
 #[repr(C)]
 pub struct FfiOpenOptions {
+    /// Open the file for reads.
     read: i32,
+    /// Open the file for writes.
     write: i32,
+    /// Create the file when it does not exist.
     create: i32,
+    /// Position sequential writes at the end of the file.
     append: i32,
+    /// Clear an existing file when it is opened.
     truncate_existing: i32,
 }
 
 #[repr(C)]
 pub struct FfiS3Config {
+    /// S3 bucket that stores SlateDB objects.
     bucket: *const c_char,
+    /// Prefix within the bucket reserved for this filesystem.
     root: *const c_char,
+    /// Optional S3-compatible service endpoint.
     endpoint: *const c_char,
+    /// AWS region used to sign S3 requests.
     region: *const c_char,
+    /// Optional access-key identifier.
     key_id: *const c_char,
+    /// Optional secret access key.
     secret: *const c_char,
+    /// Optional temporary-credential session token.
     session_token: *const c_char,
+    /// Whether the endpoint should use HTTPS.
     use_ssl: i32,
+    /// Whether S3 requests should use virtual-host-style addressing.
     virtual_host_style: i32,
 }
 
 #[repr(C)]
 pub struct FfiCacheConfig {
+    /// Maximum bytes retained in the in-memory data-block cache; zero disables it.
     block_cache_size_bytes: u64,
+    /// Maximum bytes retained in the in-memory SST metadata cache; zero disables it.
     metadata_cache_size_bytes: u64,
-    foyer_shards: u64,
+    /// Number of cache shards; zero selects an implementation default.
+    cache_shards: u64,
+    /// Local directory for persistent cached SST parts; empty disables persistence.
     persistent_cache_path: *const c_char,
+    /// Maximum total size of the persistent cache.
     persistent_cache_size_bytes: u64,
+    /// Size of each persistent cache part; must be a multiple of 1024 bytes.
     persistent_cache_part_size_bytes: u64,
+    /// Whether memtable flush output should be inserted into the persistent cache.
     persistent_cache_on_flush: i32,
+    /// Whether compaction output should be inserted into the persistent cache.
     persistent_cache_on_compaction: i32,
+    /// Which SSTs should be preloaded into the persistent cache at startup.
     persistent_cache_preload: i32,
 }
 
@@ -168,11 +191,11 @@ unsafe fn cache_config(config: *const FfiCacheConfig) -> Result<CacheConfig> {
             ));
         }
     }
-    let foyer_shards = match config.foyer_shards {
+    let cache_shards = match config.cache_shards {
         0 => None,
         value => Some(
             usize::try_from(value)
-                .map_err(|_| invalid_argument("Foyer shard count does not fit this platform"))?,
+                .map_err(|_| invalid_argument("cache shard count does not fit this platform"))?,
         ),
     };
     let persistent_cache_preload = match config.persistent_cache_preload {
@@ -189,7 +212,7 @@ unsafe fn cache_config(config: *const FfiCacheConfig) -> Result<CacheConfig> {
     Ok(CacheConfig {
         block_cache_size_bytes: config.block_cache_size_bytes,
         metadata_cache_size_bytes: config.metadata_cache_size_bytes,
-        foyer_shards,
+        cache_shards,
         persistent_cache_path,
         persistent_cache_size_bytes,
         persistent_cache_part_size_bytes,

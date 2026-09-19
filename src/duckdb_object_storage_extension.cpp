@@ -19,7 +19,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(512ULL * 1024 * 1024));
 	config.AddExtensionOption("duckdb_objfs_metadata_cache_size", "Foyer SST metadata cache capacity in bytes",
 	                          LogicalType::UBIGINT, Value::UBIGINT(128ULL * 1024 * 1024));
-	config.AddExtensionOption("duckdb_objfs_foyer_shards", "Foyer shard count; zero selects the CPU count",
+	config.AddExtensionOption("duckdb_objfs_cache_shards", "In-memory cache shard count; zero selects the CPU count",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 	config.AddExtensionOption("duckdb_objfs_persistent_cache_path",
 	                          "Local path for the persistent SST cache; empty disables it", LogicalType::VARCHAR,

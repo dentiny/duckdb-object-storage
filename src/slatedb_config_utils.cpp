@@ -79,7 +79,7 @@ CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener>
 	    GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_memory_cache_size", result.block_cache_size_bytes);
 	result.metadata_cache_size_bytes =
 	    GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_metadata_cache_size", result.metadata_cache_size_bytes);
-	result.foyer_shards = GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_foyer_shards", result.foyer_shards);
+	result.cache_shards = GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_cache_shards", result.cache_shards);
 	result.persistent_cache_path = GetOptionalSetting(opener, "duckdb_objfs_persistent_cache_path");
 	result.persistent_cache_size_bytes =
 	    GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_persistent_cache_size", result.persistent_cache_size_bytes);

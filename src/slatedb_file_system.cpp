@@ -46,7 +46,7 @@ slatedb_cache_config ConvertCacheConfig(const CacheInitializationConfig &config)
 	}
 	return {config.block_cache_size_bytes,
 	        config.metadata_cache_size_bytes,
-	        config.foyer_shards,
+	        config.cache_shards,
 	        config.persistent_cache_path.c_str(),
 	        config.persistent_cache_size_bytes,
 	        config.persistent_cache_part_size_bytes,

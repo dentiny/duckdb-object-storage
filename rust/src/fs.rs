@@ -29,33 +29,53 @@ pub struct SlateDbFileSystem {
 }
 
 pub struct S3StorageConfig {
+    /// S3 bucket that stores SlateDB objects.
     pub bucket: String,
+    /// Optional prefix within the bucket reserved for this filesystem.
     pub root: Option<String>,
+    /// Optional S3-compatible service endpoint.
     pub endpoint: Option<String>,
+    /// AWS region used to sign S3 requests.
     pub region: Option<String>,
+    /// Optional access-key identifier.
     pub key_id: Option<String>,
+    /// Optional secret access key.
     pub secret: Option<String>,
+    /// Optional temporary-credential session token.
     pub session_token: Option<String>,
+    /// Whether the endpoint should use HTTPS.
     pub use_ssl: bool,
+    /// Whether S3 requests should use virtual-host-style addressing.
     pub virtual_host_style: bool,
 }
 
 #[derive(Clone, Copy)]
 pub enum PersistentCachePreload {
+    /// Preload only level-zero SSTs.
     L0,
+    /// Preload both level-zero and compacted SSTs.
     All,
 }
 
 #[derive(Clone)]
 pub struct CacheConfig {
+    /// Maximum bytes retained in the in-memory data-block cache; zero disables it.
     pub block_cache_size_bytes: u64,
+    /// Maximum bytes retained in the in-memory SST metadata cache; zero disables it.
     pub metadata_cache_size_bytes: u64,
-    pub foyer_shards: Option<usize>,
+    /// Number of cache shards, or `None` to use the implementation default.
+    pub cache_shards: Option<usize>,
+    /// Local directory for persistent cached SST parts, or `None` to disable persistence.
     pub persistent_cache_path: Option<std::path::PathBuf>,
+    /// Maximum total size of the persistent cache.
     pub persistent_cache_size_bytes: usize,
+    /// Size of each persistent cache part; must be a multiple of 1024 bytes.
     pub persistent_cache_part_size_bytes: usize,
+    /// Whether memtable flush output should be inserted into the persistent cache.
     pub persistent_cache_on_flush: bool,
+    /// Whether compaction output should be inserted into the persistent cache.
     pub persistent_cache_on_compaction: bool,
+    /// Optional set of SSTs to preload into the persistent cache at startup.
     pub persistent_cache_preload: Option<PersistentCachePreload>,
 }
 
@@ -64,7 +84,7 @@ impl Default for CacheConfig {
         Self {
             block_cache_size_bytes: slatedb::db_cache::DEFAULT_BLOCK_CACHE_CAPACITY,
             metadata_cache_size_bytes: slatedb::db_cache::DEFAULT_META_CACHE_CAPACITY,
-            foyer_shards: None,
+            cache_shards: None,
             persistent_cache_path: None,
             persistent_cache_size_bytes: 16 * 1024 * 1024 * 1024,
             persistent_cache_part_size_bytes: 4 * 1024 * 1024,
@@ -122,11 +142,11 @@ impl SlateDbFileSystem {
         } else {
             let block_cache = build_foyer_cache(
                 cache_config.block_cache_size_bytes,
-                cache_config.foyer_shards,
+                cache_config.cache_shards,
             );
             let metadata_cache = build_foyer_cache(
                 cache_config.metadata_cache_size_bytes,
-                cache_config.foyer_shards,
+                cache_config.cache_shards,
             );
             let cache = SplitCache::new()
                 .with_block_cache(block_cache)
