@@ -104,6 +104,16 @@ impl From<slatedb::Error> for Error {
     }
 }
 
+impl<T> From<std::sync::PoisonError<T>> for Error {
+    #[track_caller]
+    fn from(_: std::sync::PoisonError<T>) -> Self {
+        Error::Io(ErrorStruct::new(
+            "lock is poisoned".to_string(),
+            ErrorStatus::Permanent,
+        ))
+    }
+}
+
 impl From<std::io::Error> for Error {
     #[track_caller]
     fn from(source: std::io::Error) -> Self {
@@ -159,6 +169,24 @@ mod tests {
         assert!(matches!(error, Error::Io(_)));
         assert_eq!(error.status(), ErrorStatus::Temporary);
         assert!(error.to_string().contains("io error"));
+    }
+
+    #[test]
+    fn poisoned_locks_are_permanent_io_errors() {
+        let lock = std::sync::Arc::new(std::sync::Mutex::new(0));
+        let poisoner = std::sync::Arc::clone(&lock);
+        // A panic while the guard is held is the only way to poison a lock.
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().expect("uncontended lock");
+            panic!("poisoning the lock under test");
+        })
+        .join();
+
+        let error = Error::from(lock.lock().expect_err("lock should be poisoned"));
+
+        assert!(matches!(error, Error::Io(_)));
+        assert_eq!(error.status(), ErrorStatus::Permanent);
+        assert!(error.to_string().contains("lock is poisoned"));
     }
 
     #[test]

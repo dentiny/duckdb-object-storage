@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_metadata::FileMetadata;
 use crate::flags::FileOpenFlags;
+use crate::flush_batcher::FlushBatcher;
 use crate::keys;
 use crate::util::current_time_millis;
 
@@ -62,6 +63,7 @@ pub trait FileHandle: Debug {
 
 pub struct SlateFileHandle {
     db: Arc<Db>,
+    flush_batcher: Arc<FlushBatcher>,
     file_id: u64,
     position: u64,
     size: u64,
@@ -84,8 +86,9 @@ struct ChunkRead {
 
 impl SlateFileHandle {
     /// Open a handle over an existing metadata record.
-    pub fn new(
+    pub(crate) fn new(
         db: Arc<Db>,
+        flush_batcher: Arc<FlushBatcher>,
         file_id: u64,
         metadata: FileMetadata,
         flags: FileOpenFlags,
@@ -96,6 +99,7 @@ impl SlateFileHandle {
 
         Ok(Self {
             db,
+            flush_batcher,
             file_id,
             position,
             size: metadata.size,
@@ -416,7 +420,7 @@ impl FileHandle for SlateFileHandle {
         );
 
         self.db.write(batch).await?;
-        self.db.flush().await?;
+        self.flush_batcher.flush().await?;
 
         self.dirty_chunks.clear();
         self.deleted_chunks.clear();
@@ -507,6 +511,7 @@ mod tests {
 
     struct TestDb {
         db: Arc<Db>,
+        flush_batcher: Arc<FlushBatcher>,
     }
 
     impl TestDb {
@@ -514,11 +519,14 @@ mod tests {
             let operator =
                 Operator::new(Memory::default()).expect("create OpenDAL memory operator");
             let store = Arc::new(OpendalStore::new(operator));
-            let db = Db::builder("handle-test", store)
-                .build()
-                .await
-                .expect("open slatedb");
-            Self { db: Arc::new(db) }
+            let db = Arc::new(
+                Db::builder("handle-test", store)
+                    .build()
+                    .await
+                    .expect("open slatedb"),
+            );
+            let flush_batcher = Arc::new(FlushBatcher::new(Arc::clone(&db)));
+            Self { db, flush_batcher }
         }
 
         fn handle(&self, file_id: u64, flags: FileOpenFlags) -> SlateFileHandle {
@@ -527,7 +535,7 @@ mod tests {
                 modified_at_ms: 1,
                 chunk_size: SMALL_CHUNK,
             };
-            SlateFileHandle::new(Arc::clone(&self.db), file_id, metadata, flags).unwrap()
+            self.open(file_id, metadata, flags)
         }
 
         async fn reopen(&self, file_id: u64, flags: FileOpenFlags) -> SlateFileHandle {
@@ -538,7 +546,23 @@ mod tests {
                 .unwrap()
                 .expect("metadata");
             let metadata = FileMetadata::decode_from_bytes(&bytes).unwrap();
-            SlateFileHandle::new(Arc::clone(&self.db), file_id, metadata, flags).unwrap()
+            self.open(file_id, metadata, flags)
+        }
+
+        fn open(
+            &self,
+            file_id: u64,
+            metadata: FileMetadata,
+            flags: FileOpenFlags,
+        ) -> SlateFileHandle {
+            SlateFileHandle::new(
+                Arc::clone(&self.db),
+                Arc::clone(&self.flush_batcher),
+                file_id,
+                metadata,
+                flags,
+            )
+            .unwrap()
         }
 
         async fn close(self) {
