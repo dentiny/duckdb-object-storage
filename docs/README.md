@@ -137,6 +137,21 @@ SST-statistics cache entries.
 adapter does not expose those values. The function returns no rows before the
 filesystem is initialized.
 
+## I/O statistics
+
+Query cumulative OpenDAL I/O statistics after the filesystem is initialized:
+
+```sql
+SELECT * FROM duckdb_objfs_io_stats();
+```
+
+The function returns one row each for `read` and `write`, with
+`request_count`, `average_latency_ms`, and `stddev_latency_ms`. Standard
+deviation is calculated over the complete observed population. Read latency
+covers the data read, and write latency runs until the writer is closed,
+aborted, or dropped. The function returns no rows before the first
+`duckdb_objfs://` access.
+
 ## Path semantics
 
 `duckdb_objfs://` paths identify logical DuckDB files:

@@ -86,6 +86,21 @@ typedef struct slatedb_cache_stats {
 	uint64_t persistent_cache_evicted_bytes;
 } slatedb_cache_stats;
 
+typedef struct slatedb_io_stats {
+	// Number of OpenDAL read requests.
+	uint64_t read_request_count;
+	// Average OpenDAL read latency in seconds.
+	double read_average_latency_seconds;
+	// Population standard deviation of OpenDAL read latency in seconds.
+	double read_stddev_latency_seconds;
+	// Number of OpenDAL write requests.
+	uint64_t write_request_count;
+	// Average OpenDAL write latency in seconds.
+	double write_average_latency_seconds;
+	// Population standard deviation of OpenDAL write latency in seconds.
+	double write_stddev_latency_seconds;
+} slatedb_io_stats;
+
 typedef enum slatedb_fs_error_code {
 	SLATEDB_FS_ERROR_NONE = 0,
 	SLATEDB_FS_ERROR_METADATA_DECODE = 1,
@@ -103,6 +118,7 @@ int32_t slatedb_fs_create_s3(const slatedb_s3_config *config, const slatedb_cach
                              slatedb_fs **output);
 void slatedb_fs_destroy(slatedb_fs *fs);
 int32_t slatedb_fs_get_cache_stats(const slatedb_fs *fs, slatedb_cache_stats *output);
+int32_t slatedb_fs_get_io_stats(const slatedb_fs *fs, slatedb_io_stats *output);
 
 // Operations return zero on success and a stable error code on failure.
 // The error message remains valid on the calling thread until its next failure.

@@ -98,6 +98,23 @@ pub struct FfiCacheStats {
     persistent_cache_evicted_bytes: u64,
 }
 
+#[repr(C)]
+#[derive(Default)]
+pub struct FfiIoStats {
+    /// Number of OpenDAL read requests.
+    read_request_count: u64,
+    /// Average OpenDAL read latency in seconds.
+    read_average_latency_seconds: f64,
+    /// Population standard deviation of OpenDAL read latency in seconds.
+    read_stddev_latency_seconds: f64,
+    /// Number of OpenDAL write requests.
+    write_request_count: u64,
+    /// Average OpenDAL write latency in seconds.
+    write_average_latency_seconds: f64,
+    /// Population standard deviation of OpenDAL write latency in seconds.
+    write_stddev_latency_seconds: f64,
+}
+
 /// Synchronous FFI context owning the one async runtime used by this
 /// filesystem instance.
 pub struct FfiFileSystem {
@@ -403,6 +420,27 @@ pub unsafe extern "C" fn slatedb_fs_get_cache_stats(
             persistent_cache_size_bytes: stats.persistent_cache_size_bytes,
             persistent_cache_evictions: stats.persistent_cache_evictions,
             persistent_cache_evicted_bytes: stats.persistent_cache_evicted_bytes,
+        };
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_fs_get_io_stats(
+    fs: *const FfiFileSystem,
+    output: *mut FfiIoStats,
+) -> i32 {
+    ffi_result(|| {
+        let fs = unsafe { require_fs(fs)? };
+        let output = unsafe { require_output(output, "I/O stats output")? };
+        let stats = fs.fs.io_stats();
+        *output = FfiIoStats {
+            read_request_count: stats.read.request_count,
+            read_average_latency_seconds: stats.read.average_latency_seconds,
+            read_stddev_latency_seconds: stats.read.stddev_latency_seconds,
+            write_request_count: stats.write.request_count,
+            write_average_latency_seconds: stats.write.average_latency_seconds,
+            write_stddev_latency_seconds: stats.write.stddev_latency_seconds,
         };
         Ok(())
     })
