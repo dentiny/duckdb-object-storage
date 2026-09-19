@@ -43,10 +43,9 @@ SELECT sum(i) FROM cache_db.items
 ----
 523776
 
-query TTTTT rowsort
+query TTTT rowsort
 SELECT cache,
-       enabled::VARCHAR,
-       capacity_bytes::VARCHAR,
+       (hit_count >= 0 AND miss_count >= 0)::VARCHAR,
        (hit_rate IS NULL OR hit_rate BETWEEN 0 AND 1)::VARCHAR,
        (CASE WHEN cache = 'persistent'
              THEN size_bytes IS NOT NULL
@@ -54,9 +53,9 @@ SELECT cache,
         END)::VARCHAR
 FROM duckdb_objfs_cache_stats()
 ----
-memory_data	true	1048576	true	true
-memory_metadata	true	524288	true	true
-persistent	true	8388608	true	true
+memory_data	true	true	true
+memory_metadata	true	true	true
+persistent	true	true	true
 
 statement ok
 DETACH cache_db

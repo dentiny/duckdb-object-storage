@@ -127,10 +127,10 @@ SELECT * FROM duckdb_objfs_cache_stats();
 ```
 
 The function returns rows for `memory_data`, `memory_metadata`, and
-`persistent` caches. It reports whether each cache is enabled, hit and miss
-counts, hit rate, and configured capacity. The persistent row also reports its
-current entry count, size, and eviction totals. Metadata statistics aggregate
-SlateDB's index, filter, and SST-statistics cache entries.
+`persistent` caches. It reports hit and miss counts and hit rate. The
+persistent row also reports its current entry count, size, and eviction
+totals. Metadata statistics aggregate SlateDB's index, filter, and
+SST-statistics cache entries.
 
 `hit_rate` is `NULL` until a cache has been accessed. In-memory `entry_count`,
 `size_bytes`, and eviction fields are `NULL` because SlateDB's Foyer cache

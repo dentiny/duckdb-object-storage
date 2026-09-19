@@ -28,7 +28,6 @@ pub const NAME: &str = "SlateDBFileSystem";
 pub struct SlateDbFileSystem {
     db: Option<Arc<Db>>,
     metrics: Arc<DefaultMetricsRecorder>,
-    cache_stats_config: CacheStatsConfig,
 }
 
 pub struct S3StorageConfig {
@@ -87,41 +86,16 @@ impl Default for CacheConfig {
     }
 }
 
-#[derive(Clone, Copy)]
-struct CacheStatsConfig {
-    block_cache_size_bytes: u64,
-    metadata_cache_size_bytes: u64,
-    persistent_cache_enabled: bool,
-    persistent_cache_size_bytes: u64,
-}
-
-impl From<&CacheConfig> for CacheStatsConfig {
-    fn from(config: &CacheConfig) -> Self {
-        Self {
-            block_cache_size_bytes: config.block_cache_size_bytes,
-            metadata_cache_size_bytes: config.metadata_cache_size_bytes,
-            persistent_cache_enabled: config.persistent_cache_path.is_some(),
-            persistent_cache_size_bytes: config.persistent_cache_size_bytes as u64,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CacheStats {
-    pub block_cache_enabled: bool,
     pub block_cache_hits: u64,
     pub block_cache_misses: u64,
-    pub block_cache_capacity_bytes: u64,
-    pub metadata_cache_enabled: bool,
     pub metadata_cache_hits: u64,
     pub metadata_cache_misses: u64,
-    pub metadata_cache_capacity_bytes: u64,
-    pub persistent_cache_enabled: bool,
     pub persistent_cache_hits: u64,
     pub persistent_cache_misses: u64,
     pub persistent_cache_entries: u64,
     pub persistent_cache_size_bytes: u64,
-    pub persistent_cache_capacity_bytes: u64,
     pub persistent_cache_evictions: u64,
     pub persistent_cache_evicted_bytes: u64,
 }
@@ -165,7 +139,6 @@ impl SlateDbFileSystem {
         }
 
         let object_store = Arc::new(OpendalStore::new(operator));
-        let cache_stats_config = CacheStatsConfig::from(&cache_config);
         let metrics = Arc::new(DefaultMetricsRecorder::new());
         let mut settings = Settings::default();
         if let Some(path) = cache_config.persistent_cache_path {
@@ -204,7 +177,6 @@ impl SlateDbFileSystem {
         Ok(Self {
             db: Some(Arc::new(db)),
             metrics,
-            cache_stats_config,
         })
     }
 
@@ -319,20 +291,14 @@ impl SlateDbFileSystem {
         let persistent_accesses = metric_counter(&metrics, PERSISTENT_ACCESS_COUNT, &[]);
 
         CacheStats {
-            block_cache_enabled: self.cache_stats_config.block_cache_size_bytes > 0,
             block_cache_hits: block_hits,
             block_cache_misses: block_misses,
-            block_cache_capacity_bytes: self.cache_stats_config.block_cache_size_bytes,
-            metadata_cache_enabled: self.cache_stats_config.metadata_cache_size_bytes > 0,
             metadata_cache_hits: metadata_hits,
             metadata_cache_misses: metadata_misses,
-            metadata_cache_capacity_bytes: self.cache_stats_config.metadata_cache_size_bytes,
-            persistent_cache_enabled: self.cache_stats_config.persistent_cache_enabled,
             persistent_cache_hits: persistent_hits,
             persistent_cache_misses: persistent_accesses.saturating_sub(persistent_hits),
             persistent_cache_entries: metric_gauge(&metrics, PERSISTENT_CACHE_KEYS, &[]),
             persistent_cache_size_bytes: metric_gauge(&metrics, PERSISTENT_CACHE_BYTES, &[]),
-            persistent_cache_capacity_bytes: self.cache_stats_config.persistent_cache_size_bytes,
             persistent_cache_evictions: metric_counter(&metrics, PERSISTENT_EVICTED_KEYS, &[]),
             persistent_cache_evicted_bytes: metric_counter(&metrics, PERSISTENT_EVICTED_BYTES, &[]),
         }

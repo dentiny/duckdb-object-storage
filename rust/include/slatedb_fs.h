@@ -64,24 +64,14 @@ typedef struct slatedb_cache_config {
 } slatedb_cache_config;
 
 typedef struct slatedb_cache_stats {
-	// Whether the in-memory data-block cache is enabled.
-	int32_t block_cache_enabled;
 	// Successful in-memory data-block cache lookups.
 	uint64_t block_cache_hits;
 	// Unsuccessful in-memory data-block cache lookups.
 	uint64_t block_cache_misses;
-	// Configured in-memory data-block cache capacity.
-	uint64_t block_cache_capacity_bytes;
-	// Whether the in-memory metadata cache is enabled.
-	int32_t metadata_cache_enabled;
 	// Successful in-memory metadata cache lookups.
 	uint64_t metadata_cache_hits;
 	// Unsuccessful in-memory metadata cache lookups.
 	uint64_t metadata_cache_misses;
-	// Configured in-memory metadata cache capacity.
-	uint64_t metadata_cache_capacity_bytes;
-	// Whether the persistent cache is enabled.
-	int32_t persistent_cache_enabled;
 	// Successful persistent cache part lookups.
 	uint64_t persistent_cache_hits;
 	// Unsuccessful persistent cache part lookups.
@@ -90,8 +80,6 @@ typedef struct slatedb_cache_stats {
 	uint64_t persistent_cache_entries;
 	// Current persistent cache size.
 	uint64_t persistent_cache_size_bytes;
-	// Configured persistent cache capacity.
-	uint64_t persistent_cache_capacity_bytes;
 	// Number of persistent cache entries evicted.
 	uint64_t persistent_cache_evictions;
 	// Number of persistent cache bytes evicted.

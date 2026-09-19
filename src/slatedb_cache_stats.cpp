@@ -40,8 +40,6 @@ unique_ptr<FunctionData> CacheStatsBind(ClientContext &, TableFunctionBindInput 
                                         vector<LogicalType> &return_types, vector<string> &names) {
 	names.emplace_back("cache");
 	return_types.emplace_back(LogicalType::VARCHAR);
-	names.emplace_back("enabled");
-	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("hit_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("miss_count");
@@ -51,8 +49,6 @@ unique_ptr<FunctionData> CacheStatsBind(ClientContext &, TableFunctionBindInput 
 	names.emplace_back("entry_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("size_bytes");
-	return_types.emplace_back(LogicalType::UBIGINT);
-	names.emplace_back("capacity_bytes");
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("eviction_count");
 	return_types.emplace_back(LogicalType::UBIGINT);
@@ -81,14 +77,11 @@ Value HitRate(uint64_t hits, uint64_t misses) {
 	return Value::DOUBLE(static_cast<double>(hits) / static_cast<double>(accesses));
 }
 
-void SetCommonValues(DataChunk &output, idx_t row, const char *cache, bool enabled, uint64_t hits, uint64_t misses,
-                     uint64_t capacity) {
+void SetCommonValues(DataChunk &output, idx_t row, const char *cache, uint64_t hits, uint64_t misses) {
 	output.SetValue(0, row, Value(cache));
-	output.SetValue(1, row, Value::BOOLEAN(enabled));
-	output.SetValue(2, row, Value::UBIGINT(hits));
-	output.SetValue(3, row, Value::UBIGINT(misses));
-	output.SetValue(4, row, HitRate(hits, misses));
-	output.SetValue(7, row, Value::UBIGINT(capacity));
+	output.SetValue(1, row, Value::UBIGINT(hits));
+	output.SetValue(2, row, Value::UBIGINT(misses));
+	output.SetValue(3, row, HitRate(hits, misses));
 }
 
 void CacheStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &output) {
@@ -100,29 +93,26 @@ void CacheStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &o
 	idx_t count = 0;
 	while (state.offset < 3 && count < STANDARD_VECTOR_SIZE) {
 		if (state.offset == 0) {
-			SetCommonValues(output, count, "memory_data", state.stats.block_cache_enabled != 0,
-			                state.stats.block_cache_hits, state.stats.block_cache_misses,
-			                state.stats.block_cache_capacity_bytes);
+			SetCommonValues(output, count, "memory_data", state.stats.block_cache_hits,
+			                state.stats.block_cache_misses);
+			output.SetValue(4, count, Value());
 			output.SetValue(5, count, Value());
 			output.SetValue(6, count, Value());
-			output.SetValue(8, count, Value());
-			output.SetValue(9, count, Value());
+			output.SetValue(7, count, Value());
 		} else if (state.offset == 1) {
-			SetCommonValues(output, count, "memory_metadata", state.stats.metadata_cache_enabled != 0,
-			                state.stats.metadata_cache_hits, state.stats.metadata_cache_misses,
-			                state.stats.metadata_cache_capacity_bytes);
+			SetCommonValues(output, count, "memory_metadata", state.stats.metadata_cache_hits,
+			                state.stats.metadata_cache_misses);
+			output.SetValue(4, count, Value());
 			output.SetValue(5, count, Value());
 			output.SetValue(6, count, Value());
-			output.SetValue(8, count, Value());
-			output.SetValue(9, count, Value());
+			output.SetValue(7, count, Value());
 		} else {
-			SetCommonValues(output, count, "persistent", state.stats.persistent_cache_enabled != 0,
-			                state.stats.persistent_cache_hits, state.stats.persistent_cache_misses,
-			                state.stats.persistent_cache_capacity_bytes);
-			output.SetValue(5, count, Value::UBIGINT(state.stats.persistent_cache_entries));
-			output.SetValue(6, count, Value::UBIGINT(state.stats.persistent_cache_size_bytes));
-			output.SetValue(8, count, Value::UBIGINT(state.stats.persistent_cache_evictions));
-			output.SetValue(9, count, Value::UBIGINT(state.stats.persistent_cache_evicted_bytes));
+			SetCommonValues(output, count, "persistent", state.stats.persistent_cache_hits,
+			                state.stats.persistent_cache_misses);
+			output.SetValue(4, count, Value::UBIGINT(state.stats.persistent_cache_entries));
+			output.SetValue(5, count, Value::UBIGINT(state.stats.persistent_cache_size_bytes));
+			output.SetValue(6, count, Value::UBIGINT(state.stats.persistent_cache_evictions));
+			output.SetValue(7, count, Value::UBIGINT(state.stats.persistent_cache_evicted_bytes));
 		}
 		state.offset++;
 		count++;
