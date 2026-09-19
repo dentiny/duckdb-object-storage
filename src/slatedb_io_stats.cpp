@@ -71,15 +71,14 @@ void IoStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &outp
 	while (state.offset < 2 && count < STANDARD_VECTOR_SIZE) {
 		const bool is_read = state.offset == 0;
 		const auto request_count = is_read ? state.stats.read_request_count : state.stats.write_request_count;
-		const auto average_seconds =
-		    is_read ? state.stats.read_average_latency_seconds : state.stats.write_average_latency_seconds;
-		const auto stddev_seconds =
-		    is_read ? state.stats.read_stddev_latency_seconds : state.stats.write_stddev_latency_seconds;
+		const auto average_ms =
+		    is_read ? state.stats.read_average_latency_ms : state.stats.write_average_latency_ms;
+		const auto stddev_ms = is_read ? state.stats.read_stddev_latency_ms : state.stats.write_stddev_latency_ms;
 
 		output.SetValue(0, count, Value(is_read ? "read" : "write"));
 		output.SetValue(1, count, Value::UBIGINT(request_count));
-		output.SetValue(2, count, Value::DOUBLE(average_seconds * 1000.0));
-		output.SetValue(3, count, Value::DOUBLE(stddev_seconds * 1000.0));
+		output.SetValue(2, count, Value::DOUBLE(average_ms));
+		output.SetValue(3, count, Value::DOUBLE(stddev_ms));
 		state.offset++;
 		count++;
 	}

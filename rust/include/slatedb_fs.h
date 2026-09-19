@@ -89,16 +89,16 @@ typedef struct slatedb_cache_stats {
 typedef struct slatedb_io_stats {
 	// Number of OpenDAL read requests.
 	uint64_t read_request_count;
-	// Average OpenDAL read latency in seconds.
-	double read_average_latency_seconds;
-	// Population standard deviation of OpenDAL read latency in seconds.
-	double read_stddev_latency_seconds;
+	// Average OpenDAL read latency in milliseconds.
+	double read_average_latency_ms;
+	// Population standard deviation of OpenDAL read latency in milliseconds.
+	double read_stddev_latency_ms;
 	// Number of OpenDAL write requests.
 	uint64_t write_request_count;
-	// Average OpenDAL write latency in seconds.
-	double write_average_latency_seconds;
-	// Population standard deviation of OpenDAL write latency in seconds.
-	double write_stddev_latency_seconds;
+	// Average OpenDAL write latency in milliseconds.
+	double write_average_latency_ms;
+	// Population standard deviation of OpenDAL write latency in milliseconds.
+	double write_stddev_latency_ms;
 } slatedb_io_stats;
 
 typedef enum slatedb_fs_error_code {

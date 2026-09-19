@@ -103,16 +103,16 @@ pub struct FfiCacheStats {
 pub struct FfiIoStats {
     /// Number of OpenDAL read requests.
     read_request_count: u64,
-    /// Average OpenDAL read latency in seconds.
-    read_average_latency_seconds: f64,
-    /// Population standard deviation of OpenDAL read latency in seconds.
-    read_stddev_latency_seconds: f64,
+    /// Average OpenDAL read latency in milliseconds.
+    read_average_latency_ms: f64,
+    /// Population standard deviation of OpenDAL read latency in milliseconds.
+    read_stddev_latency_ms: f64,
     /// Number of OpenDAL write requests.
     write_request_count: u64,
-    /// Average OpenDAL write latency in seconds.
-    write_average_latency_seconds: f64,
-    /// Population standard deviation of OpenDAL write latency in seconds.
-    write_stddev_latency_seconds: f64,
+    /// Average OpenDAL write latency in milliseconds.
+    write_average_latency_ms: f64,
+    /// Population standard deviation of OpenDAL write latency in milliseconds.
+    write_stddev_latency_ms: f64,
 }
 
 /// Synchronous FFI context owning the one async runtime used by this
@@ -265,6 +265,10 @@ unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlag
 
 unsafe fn require_output<'a, T>(output: *mut T, name: &str) -> Result<&'a mut T> {
     unsafe { output.as_mut() }.ok_or_else(|| invalid_argument(format!("{name} must not be null")))
+}
+
+fn duration_as_milliseconds(duration: std::time::Duration) -> f64 {
+    duration.as_secs() as f64 * 1000.0 + f64::from(duration.subsec_nanos()) / 1_000_000.0
 }
 
 unsafe fn with_file_handle<T>(
@@ -436,11 +440,11 @@ pub unsafe extern "C" fn slatedb_fs_get_io_stats(
         let stats = fs.fs.io_stats();
         *output = FfiIoStats {
             read_request_count: stats.read.request_count,
-            read_average_latency_seconds: stats.read.average_latency_seconds,
-            read_stddev_latency_seconds: stats.read.stddev_latency_seconds,
+            read_average_latency_ms: duration_as_milliseconds(stats.read.average_latency),
+            read_stddev_latency_ms: duration_as_milliseconds(stats.read.stddev_latency),
             write_request_count: stats.write.request_count,
-            write_average_latency_seconds: stats.write.average_latency_seconds,
-            write_stddev_latency_seconds: stats.write.stddev_latency_seconds,
+            write_average_latency_ms: duration_as_milliseconds(stats.write.average_latency),
+            write_stddev_latency_ms: duration_as_milliseconds(stats.write.stddev_latency),
         };
         Ok(())
     })

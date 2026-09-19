@@ -6,8 +6,8 @@ use crate::fs::SlateDbFileSystem;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IoOperationStats {
     pub request_count: u64,
-    pub average_latency_seconds: f64,
-    pub stddev_latency_seconds: f64,
+    pub average_latency: Duration,
+    pub stddev_latency: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -19,7 +19,7 @@ pub struct IoStats {
 #[derive(Debug, Default)]
 struct RunningStats {
     count: u64,
-    mean_seconds: f64,
+    mean: f64,
     squared_deviation_sum: f64,
 }
 
@@ -27,9 +27,9 @@ impl RunningStats {
     fn record(&mut self, duration: Duration) {
         let latency = duration.as_secs_f64();
         self.count += 1;
-        let delta = latency - self.mean_seconds;
-        self.mean_seconds += delta / self.count as f64;
-        let delta_after_mean_update = latency - self.mean_seconds;
+        let delta = latency - self.mean;
+        self.mean += delta / self.count as f64;
+        let delta_after_mean_update = latency - self.mean;
         self.squared_deviation_sum += delta * delta_after_mean_update;
     }
 
@@ -41,8 +41,8 @@ impl RunningStats {
         };
         IoOperationStats {
             request_count: self.count,
-            average_latency_seconds: self.mean_seconds,
-            stddev_latency_seconds: variance.sqrt(),
+            average_latency: Duration::from_secs_f64(self.mean),
+            stddev_latency: Duration::from_secs_f64(variance.sqrt()),
         }
     }
 }
@@ -94,7 +94,7 @@ mod tests {
 
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.request_count, 2);
-        assert_eq!(snapshot.average_latency_seconds, 2.0);
-        assert_eq!(snapshot.stddev_latency_seconds, 1.0);
+        assert_eq!(snapshot.average_latency, Duration::from_secs(2));
+        assert_eq!(snapshot.stddev_latency, Duration::from_secs(1));
     }
 }

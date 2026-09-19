@@ -291,7 +291,7 @@ mod tests {
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.write.request_count, 1);
         assert_eq!(snapshot.read.request_count, 1);
-        assert!(snapshot.write.average_latency_seconds >= 0.0);
-        assert!(snapshot.read.average_latency_seconds >= 0.0);
+        assert!(snapshot.write.average_latency >= std::time::Duration::ZERO);
+        assert!(snapshot.read.average_latency >= std::time::Duration::ZERO);
     }
 }
