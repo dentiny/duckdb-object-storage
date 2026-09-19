@@ -1,0 +1,40 @@
+# name: test/sql/duckdb_object_storage_io_stats.test
+# description: test per-operation OpenDAL I/O statistics
+# group: [sql]
+
+require duckdb_object_storage
+
+query I
+SELECT count(*) FROM duckdb_objfs_io_stats()
+----
+0
+
+statement ok
+SET duckdb_objfs_backend = 'memory'
+
+statement ok
+ATTACH 'duckdb_objfs://io-stats.db' AS io_db
+
+statement ok
+CREATE TABLE io_db.items AS SELECT range AS i FROM range(1024)
+
+statement ok
+CHECKPOINT io_db
+
+query I
+SELECT sum(i) FROM io_db.items
+----
+523776
+
+query TTTT rowsort
+SELECT operation,
+       (request_count > 0)::VARCHAR,
+       (average_latency_ms >= 0)::VARCHAR,
+       (stddev_latency_ms >= 0)::VARCHAR
+FROM duckdb_objfs_io_stats()
+----
+read	true	true	true
+write	true	true	true
+
+statement ok
+DETACH io_db

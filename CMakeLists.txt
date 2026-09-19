@@ -16,6 +16,7 @@ set(EXTENSION_SOURCES
     src/slatedb_ffi_utils.cpp
     src/slatedb_file_handle.cpp
     src/slatedb_file_system.cpp
+    src/slatedb_io_stats.cpp
     src/slatedb_path_utils.cpp)
 
 # ---------------------------------------------------------------------------

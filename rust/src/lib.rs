@@ -12,7 +12,9 @@ mod file_handle;
 mod file_metadata;
 mod flags;
 mod fs;
+mod io_metrics;
 mod keys;
+mod opendal_io_metrics_layer;
 mod util;
 
 pub use cache::{CacheConfig, CacheStats};
@@ -21,3 +23,4 @@ pub use error_struct::{ErrorStatus, ErrorStruct};
 pub use file_handle::{FileHandle, SlateFileHandle};
 pub use flags::FileOpenFlags;
 pub use fs::SlateDbFileSystem;
+pub use io_metrics::{IoOperationStats, IoStats};

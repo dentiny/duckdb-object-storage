@@ -3,6 +3,7 @@
 #include "duckdb_object_storage_extension.hpp"
 #include "slatedb_cache_stats.hpp"
 #include "slatedb_file_system.hpp"
+#include "slatedb_io_stats.hpp"
 #include "duckdb/main/database.hpp"
 
 namespace duckdb {
@@ -37,6 +38,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          Value(false));
 	auto file_system = make_uniq<SlateDBFileSystem>();
 	loader.RegisterFunction(GetSlateDBCacheStatsFunction(*file_system));
+	loader.RegisterFunction(GetSlateDBIoStatsFunction(*file_system));
 	instance.GetFileSystem().RegisterSubSystem(std::move(file_system));
 }
 

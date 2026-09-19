@@ -12,6 +12,8 @@ use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::SlateFileHandle;
 use crate::flags::FileOpenFlags;
+use crate::io_metrics::IoMetrics;
+use crate::opendal_io_metrics_layer::IoMetricsLayer;
 
 /// URL scheme claimed by this filesystem in DuckDB's virtual filesystem.
 pub const PREFIX: &str = "duckdb_objfs:";
@@ -26,6 +28,7 @@ pub const NAME: &str = "SlateDBFileSystem";
 pub struct SlateDbFileSystem {
     db: Option<Arc<Db>>,
     pub(crate) cache_metrics: CacheMetrics,
+    pub(crate) io_metrics: Arc<IoMetrics>,
 }
 
 pub struct S3StorageConfig {
@@ -67,6 +70,8 @@ impl SlateDbFileSystem {
             )));
         }
 
+        let io_metrics = Arc::new(IoMetrics::default());
+        let operator = operator.layer(IoMetricsLayer::new(Arc::clone(&io_metrics)));
         let object_store = Arc::new(OpendalStore::new(operator));
         let cache_metrics = CacheMetrics::new();
         let mut settings = Settings::default();
@@ -83,6 +88,7 @@ impl SlateDbFileSystem {
         Ok(Self {
             db: Some(Arc::new(db)),
             cache_metrics,
+            io_metrics,
         })
     }
 

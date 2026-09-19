@@ -155,6 +155,15 @@ bool SlateDBFileSystem::TryGetCacheStats(slatedb_cache_stats &stats) {
 	return true;
 }
 
+bool SlateDBFileSystem::TryGetIoStats(slatedb_io_stats &stats) {
+	lock_guard<mutex> guard(initialization_lock);
+	if (!impl) {
+		return false;
+	}
+	ThrowSlateDBError(slatedb_fs_get_io_stats(impl.get(), &stats), "get SlateDB I/O statistics");
+	return true;
+}
+
 unique_ptr<FileHandle> SlateDBFileSystem::OpenFile(const string &path, FileOpenFlags flags,
                                                    optional_ptr<FileOpener> opener) {
 	flags.Verify();
