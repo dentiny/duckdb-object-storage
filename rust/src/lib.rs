@@ -4,6 +4,8 @@
 //! C++ `FileSystem` adapter; opening paths through VFS is not wired yet.
 
 mod cache;
+mod chunk_manager;
+mod chunk_store;
 mod database_metadata;
 mod error;
 mod error_struct;

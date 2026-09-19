@@ -1,15 +1,13 @@
 //! Handle-level I/O matching DuckDB's `FileHandle`.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
-#[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::future;
 use slatedb::{Db, WriteBatch};
 
+use crate::chunk_manager::ChunkManager;
+use crate::chunk_store::{ChunkStore, SlateDbChunkStore};
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_metadata::FileMetadata;
@@ -66,26 +64,28 @@ pub struct SlateFileHandle {
     position: u64,
     size: u64,
     modified_at_ms: u64,
-    chunk_size: usize,
-    dirty_chunks: BTreeMap<u64, Vec<u8>>,
-    deleted_chunks: BTreeSet<u64>,
+    chunks: ChunkManager,
     metadata_dirty: bool,
     flags: FileOpenFlags,
-    #[cfg(test)]
-    fail_next_store_io: AtomicBool,
-}
-
-struct ChunkRead {
-    chunk_idx: u64,
-    buf_offset: usize,
-    chunk_offset: usize,
-    len: usize,
 }
 
 impl SlateFileHandle {
     /// Open a handle over an existing metadata record.
     pub fn new(
         db: Arc<Db>,
+        file_id: u64,
+        metadata: FileMetadata,
+        flags: FileOpenFlags,
+    ) -> Result<Self> {
+        let store = Arc::new(SlateDbChunkStore::new(Arc::clone(&db)));
+        Self::with_chunk_store(db, store, file_id, metadata, flags)
+    }
+
+    /// Open a handle whose chunks are read through `store`; `db` still carries
+    /// the metadata writes. Tests pass a store that fails on demand.
+    pub(crate) fn with_chunk_store(
+        db: Arc<Db>,
+        store: Arc<dyn ChunkStore>,
         file_id: u64,
         metadata: FileMetadata,
         flags: FileOpenFlags,
@@ -100,35 +100,10 @@ impl SlateFileHandle {
             position,
             size: metadata.size,
             modified_at_ms: metadata.modified_at_ms,
-            chunk_size,
-            dirty_chunks: BTreeMap::new(),
-            deleted_chunks: BTreeSet::new(),
+            chunks: ChunkManager::new(store, file_id, chunk_size),
             metadata_dirty: false,
             flags,
-            #[cfg(test)]
-            fail_next_store_io: AtomicBool::new(false),
         })
-    }
-
-    fn check_injected_store_fault(&self) -> Result<()> {
-        #[cfg(test)]
-        {
-            if self.fail_next_store_io.swap(false, Ordering::SeqCst) {
-                return Err(Error::from(slatedb::Error::unavailable(
-                    "injected store fault".to_string(),
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn inject_store_fault(&self) {
-        self.fail_next_store_io.store(true, Ordering::SeqCst);
-    }
-
-    fn chunk_size_u64(&self) -> u64 {
-        self.chunk_size as u64
     }
 
     fn set_metadata_dirty(&mut self) {
@@ -140,110 +115,15 @@ impl SlateFileHandle {
         FileMetadata {
             size: self.size,
             modified_at_ms: self.modified_at_ms,
-            chunk_size: self.chunk_size as u64,
+            chunk_size: self.chunks.chunk_size(),
         }
     }
 
-    async fn read_chunk_from_store(&self, chunk_idx: u64) -> Result<Vec<u8>> {
-        self.check_injected_store_fault()?;
-
-        if self.deleted_chunks.contains(&chunk_idx) {
-            return Ok(Vec::new());
-        }
-
-        let key = keys::chunk_key(self.file_id, chunk_idx);
-        let bytes = self.db.get(&key).await?;
-        Ok(bytes.map(|bytes| bytes.to_vec()).unwrap_or_default())
-    }
-
-    async fn read_chunks_from_store_parallel(&self, chunk_indices: &[u64]) -> Result<Vec<Vec<u8>>> {
-        future::try_join_all(chunk_indices.iter().map(|chunk_idx| {
-            let db = Arc::clone(&self.db);
-            let key = keys::chunk_key(self.file_id, *chunk_idx);
-            async move {
-                let bytes = db.get(&key).await?;
-                Ok::<Vec<u8>, Error>(bytes.map(|bytes| bytes.to_vec()).unwrap_or_default())
-            }
-        }))
-        .await
-    }
-
-    async fn load_chunk_for_write(&self, chunk_idx: u64) -> Result<Vec<u8>> {
-        if let Some(chunk) = self.dirty_chunks.get(&chunk_idx) {
-            return Ok(chunk.clone());
-        }
-
-        self.read_chunk_from_store(chunk_idx).await
-    }
-
-    async fn collect_persisted_chunk_indices(&self, min_chunk_idx: u64) -> Result<Vec<u64>> {
-        self.check_injected_store_fault()?;
-
-        let prefix = keys::chunk_prefix(self.file_id);
-
-        let mut iter = self.db.scan_prefix(prefix, ..).await?;
-        let mut chunk_indices = Vec::new();
-        while let Some(kv) = iter.next().await? {
-            let chunk_idx = parse_chunk_idx(kv.key.as_ref())?;
-            if chunk_idx >= min_chunk_idx {
-                chunk_indices.push(chunk_idx);
-            }
-        }
-        Ok(chunk_indices)
-    }
-
-    async fn truncate_internal(&mut self, new_size: u64) -> Result<()> {
-        if new_size == self.size {
-            return Ok(());
-        }
-
-        if new_size > self.size {
-            self.size = new_size;
-            self.set_metadata_dirty();
-            return Ok(());
-        }
-
-        if new_size == 0 {
-            let chunks_to_delete = self.collect_persisted_chunk_indices(0).await?;
-            self.dirty_chunks.clear();
-            self.deleted_chunks.extend(chunks_to_delete);
-            self.size = new_size;
-            self.set_metadata_dirty();
-            return Ok(());
-        }
-
-        let chunk_size = self.chunk_size_u64();
-        let last_byte = new_size - 1;
-        let last_chunk = last_byte / chunk_size;
-        let last_len = usize::try_from((last_byte % chunk_size) + 1).unwrap();
-
-        let shortened_last_chunk = if self.dirty_chunks.contains_key(&last_chunk) {
-            None
-        } else {
-            let mut persisted = self.read_chunk_from_store(last_chunk).await?;
-            if persisted.len() > last_len {
-                persisted.truncate(last_len);
-                Some(persisted)
-            } else {
-                None
-            }
-        };
-        let chunks_to_delete = self.collect_persisted_chunk_indices(last_chunk + 1).await?;
-
-        self.dirty_chunks
-            .retain(|chunk_idx, _| *chunk_idx <= last_chunk);
-        if let Some(chunk) = self.dirty_chunks.get_mut(&last_chunk) {
-            if chunk.len() > last_len {
-                chunk.truncate(last_len);
-            }
-        } else if let Some(shortened) = shortened_last_chunk {
-            self.dirty_chunks.insert(last_chunk, shortened);
-        }
-
-        self.deleted_chunks.extend(chunks_to_delete);
-        self.size = new_size;
-        self.set_metadata_dirty();
-        Ok(())
+    fn write_overflow(&self) -> Error {
+        Error::InvalidArgument(ErrorStruct::new(
+            format!("write overflow for file_id {}", self.file_id),
+            ErrorStatus::Permanent,
+        ))
     }
 }
 
@@ -254,8 +134,7 @@ impl Debug for SlateFileHandle {
             .field("position", &self.position)
             .field("size", &self.size)
             .field("modified_at_ms", &self.modified_at_ms)
-            .field("dirty_chunks", &self.dirty_chunks.keys())
-            .field("deleted_chunks", &self.deleted_chunks)
+            .field("chunks", &self.chunks)
             .finish()
     }
 }
@@ -269,51 +148,11 @@ impl FileHandle for SlateFileHandle {
             return Ok(0);
         }
 
+        // Never read past the end of the file.
         let bytes_to_read = usize::try_from(self.size - offset)
             .unwrap_or(usize::MAX)
             .min(buf.len());
-        buf[..bytes_to_read].fill(0);
-
-        let mut copied = 0usize;
-        let chunk_size = self.chunk_size_u64();
-        let mut persisted_reads = Vec::new();
-
-        while copied < bytes_to_read {
-            let current_offset = offset + copied as u64;
-            let chunk_idx = current_offset / chunk_size;
-            let chunk_offset = usize::try_from(current_offset % chunk_size).unwrap();
-            let chunk_remaining = self.chunk_size - chunk_offset;
-            let to_copy = (bytes_to_read - copied).min(chunk_remaining);
-
-            if let Some(chunk) = self.dirty_chunks.get(&chunk_idx) {
-                let available_in_chunk = chunk.len().saturating_sub(chunk_offset).min(to_copy);
-                buf[copied..copied + available_in_chunk]
-                    .copy_from_slice(&chunk[chunk_offset..chunk_offset + available_in_chunk]);
-            } else if !self.deleted_chunks.contains(&chunk_idx) {
-                persisted_reads.push(ChunkRead {
-                    chunk_idx,
-                    buf_offset: copied,
-                    chunk_offset,
-                    len: to_copy,
-                });
-            }
-
-            copied += to_copy;
-        }
-
-        let persisted_chunk_indices = persisted_reads
-            .iter()
-            .map(|read| read.chunk_idx)
-            .collect::<Vec<_>>();
-        let persisted_chunks = self
-            .read_chunks_from_store_parallel(&persisted_chunk_indices)
-            .await?;
-        for (read, chunk) in persisted_reads.iter().zip(persisted_chunks) {
-            let available_in_chunk = chunk.len().saturating_sub(read.chunk_offset).min(read.len);
-            buf[read.buf_offset..read.buf_offset + available_in_chunk]
-                .copy_from_slice(&chunk[read.chunk_offset..read.chunk_offset + available_in_chunk]);
-        }
-
+        self.chunks.read(&mut buf[..bytes_to_read], offset).await?;
         Ok(bytes_to_read)
     }
 
@@ -324,39 +163,11 @@ impl FileHandle for SlateFileHandle {
             return Ok(());
         }
 
-        let end_offset = offset.checked_add(data.len() as u64).ok_or_else(|| {
-            Error::InvalidArgument(ErrorStruct::new(
-                format!("write overflow for file_id {}", self.file_id),
-                ErrorStatus::Permanent,
-            ))
-        })?;
+        let end_offset = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| self.write_overflow())?;
 
-        let mut written = 0usize;
-        let chunk_size = self.chunk_size_u64();
-
-        while written < data.len() {
-            let current_offset = offset + written as u64;
-            let chunk_idx = current_offset / chunk_size;
-            let chunk_offset = usize::try_from(current_offset % chunk_size).unwrap();
-            let chunk_remaining = self.chunk_size - chunk_offset;
-            let to_copy = (data.len() - written).min(chunk_remaining);
-            let required_len = chunk_offset + to_copy;
-
-            let mut chunk = if chunk_offset == 0 && to_copy == self.chunk_size {
-                vec![0; self.chunk_size]
-            } else {
-                self.load_chunk_for_write(chunk_idx).await?
-            };
-
-            if chunk.len() < required_len {
-                chunk.resize(required_len, 0);
-            }
-
-            chunk[chunk_offset..required_len].copy_from_slice(&data[written..written + to_copy]);
-            self.deleted_chunks.remove(&chunk_idx);
-            self.dirty_chunks.insert(chunk_idx, chunk);
-            written += to_copy;
-        }
+        self.chunks.write(data, offset).await?;
 
         if end_offset > self.size {
             self.size = end_offset;
@@ -386,30 +197,20 @@ impl FileHandle for SlateFileHandle {
             self.position
         };
         self.pwrite(data, offset).await?;
-        self.position = offset.checked_add(data.len() as u64).ok_or_else(|| {
-            Error::InvalidArgument(ErrorStruct::new(
-                format!("write overflow for file_id {}", self.file_id),
-                ErrorStatus::Permanent,
-            ))
-        })?;
+        self.position = offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| self.write_overflow())?;
         Ok(data.len())
     }
 
     async fn sync(&mut self) -> Result<()> {
-        if self.dirty_chunks.is_empty() && self.deleted_chunks.is_empty() && !self.metadata_dirty {
+        if !self.chunks.has_pending_changes() && !self.metadata_dirty {
             return Ok(());
         }
 
+        // One batch, so a reader never sees a size its chunks do not back.
         let mut batch = WriteBatch::new();
-
-        for chunk_idx in &self.deleted_chunks {
-            batch.delete(keys::chunk_key(self.file_id, *chunk_idx));
-        }
-
-        for (chunk_idx, chunk) in &self.dirty_chunks {
-            batch.put(keys::chunk_key(self.file_id, *chunk_idx), chunk);
-        }
-
+        self.chunks.add_pending_to_batch(&mut batch);
         batch.put(
             keys::metadata_key(self.file_id),
             self.metadata().encode_to_bytes(),
@@ -418,8 +219,7 @@ impl FileHandle for SlateFileHandle {
         self.db.write(batch).await?;
         self.db.flush().await?;
 
-        self.dirty_chunks.clear();
-        self.deleted_chunks.clear();
+        self.chunks.mark_flushed();
         self.metadata_dirty = false;
         Ok(())
     }
@@ -442,7 +242,19 @@ impl FileHandle for SlateFileHandle {
 
     async fn truncate(&mut self, new_size: u64) -> Result<()> {
         self.flags.ensure_writable(self.file_id)?;
-        self.truncate_internal(new_size).await
+
+        if new_size == self.size {
+            return Ok(());
+        }
+
+        // Growing needs no chunk work: the new bytes read as zeroes.
+        if new_size < self.size {
+            self.chunks.truncate(new_size).await?;
+        }
+
+        self.size = new_size;
+        self.set_metadata_dirty();
+        Ok(())
     }
 
     fn get_last_modified_time(&self) -> u64 {
@@ -462,35 +274,6 @@ impl FileHandle for SlateFileHandle {
     }
 }
 
-fn parse_chunk_idx(key: &[u8]) -> Result<u64> {
-    let key = std::str::from_utf8(key).map_err(|src| {
-        Error::MetadataDecode(
-            ErrorStruct::new(
-                "chunk key is not valid utf-8".to_string(),
-                ErrorStatus::Permanent,
-            )
-            .with_source(src),
-        )
-    })?;
-
-    let chunk_idx = key.rsplit('/').next().ok_or_else(|| {
-        Error::MetadataDecode(ErrorStruct::new(
-            format!("invalid chunk key: {key}"),
-            ErrorStatus::Permanent,
-        ))
-    })?;
-
-    u64::from_str_radix(chunk_idx, 16).map_err(|src| {
-        Error::MetadataDecode(
-            ErrorStruct::new(
-                format!("invalid chunk index in key: {key}"),
-                ErrorStatus::Permanent,
-            )
-            .with_source(src),
-        )
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -501,9 +284,18 @@ mod tests {
     use slatedb::Db;
 
     use super::*;
+    use crate::chunk_store::FaultyChunkStore;
     use crate::file_metadata::FileMetadata;
 
     const SMALL_CHUNK: u64 = 8;
+
+    fn new_metadata() -> FileMetadata {
+        FileMetadata {
+            size: 0,
+            modified_at_ms: 1,
+            chunk_size: SMALL_CHUNK,
+        }
+    }
 
     struct TestDb {
         db: Arc<Db>,
@@ -522,12 +314,25 @@ mod tests {
         }
 
         fn handle(&self, file_id: u64, flags: FileOpenFlags) -> SlateFileHandle {
-            let metadata = FileMetadata {
-                size: 0,
-                modified_at_ms: 1,
-                chunk_size: SMALL_CHUNK,
-            };
-            SlateFileHandle::new(Arc::clone(&self.db), file_id, metadata, flags).unwrap()
+            SlateFileHandle::new(Arc::clone(&self.db), file_id, new_metadata(), flags).unwrap()
+        }
+
+        /// A handle whose chunk reads can be made to fail.
+        fn faulty_handle(
+            &self,
+            file_id: u64,
+            flags: FileOpenFlags,
+        ) -> (SlateFileHandle, Arc<FaultyChunkStore>) {
+            let store = Arc::new(FaultyChunkStore::new(Arc::clone(&self.db)));
+            let handle = SlateFileHandle::with_chunk_store(
+                Arc::clone(&self.db),
+                Arc::clone(&store) as Arc<dyn ChunkStore>,
+                file_id,
+                new_metadata(),
+                flags,
+            )
+            .unwrap();
+            (handle, store)
         }
 
         async fn reopen(&self, file_id: u64, flags: FileOpenFlags) -> SlateFileHandle {
@@ -615,6 +420,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_stop_at_the_end_of_the_file() {
+        let fixture = TestDb::new().await;
+        let mut handle = fixture.handle(10, FileOpenFlags::open_or_create());
+
+        handle.pwrite(b"abc", 0).await.unwrap();
+
+        // The buffer outlives the file: only its own bytes are reported.
+        let mut buf = [b'?'; 6];
+        assert_eq!(handle.pread(&mut buf, 0).await.unwrap(), 3);
+        assert_eq!(&buf, b"abc???");
+        assert_eq!(handle.pread(&mut buf, 3).await.unwrap(), 0);
+
+        handle.close().await.unwrap();
+        drop(handle);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn reads_span_persisted_and_pending_chunks() {
+        let fixture = TestDb::new().await;
+        let mut writer = fixture.handle(8, FileOpenFlags::open_or_create());
+        writer
+            .pwrite(b"aaaaaaaabbbbbbbbccccccccdddddddd", 0)
+            .await
+            .unwrap();
+        writer.close().await.unwrap();
+        drop(writer);
+
+        // Chunk 2 is only pending, so the chunks either side form two ranges.
+        let mut handle = fixture.reopen(8, FileOpenFlags::open_or_create()).await;
+        handle.pwrite(b"CCCCCCCC", 2 * SMALL_CHUNK).await.unwrap();
+
+        let mut buf = [0u8; 4 * SMALL_CHUNK as usize];
+        assert_eq!(handle.pread(&mut buf, 0).await.unwrap(), buf.len());
+        assert_eq!(&buf, b"aaaaaaaabbbbbbbbCCCCCCCCdddddddd");
+
+        handle.close().await.unwrap();
+        drop(handle);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn truncate_hides_persisted_chunks_before_sync() {
+        let fixture = TestDb::new().await;
+        let mut handle = fixture.handle(9, FileOpenFlags::open_or_create());
+        handle.pwrite(b"aaaaaaaabbbbbbbbcccccccc", 0).await.unwrap();
+        handle.sync().await.unwrap();
+
+        // Chunks 1 and 2 are persisted but pending deletion: a hole before flush.
+        handle.truncate(SMALL_CHUNK).await.unwrap();
+        handle.truncate(3 * SMALL_CHUNK).await.unwrap();
+        let mut buf = [0u8; 3 * SMALL_CHUNK as usize];
+        assert_eq!(handle.pread(&mut buf, 0).await.unwrap(), buf.len());
+        assert_eq!(&buf[..SMALL_CHUNK as usize], b"aaaaaaaa");
+        assert!(buf[SMALL_CHUNK as usize..].iter().all(|byte| *byte == 0));
+
+        // Rewriting a chunk pending deletion replaces the delete.
+        handle.pwrite(b"ZZZZZZZZ", SMALL_CHUNK).await.unwrap();
+        handle.close().await.unwrap();
+        drop(handle);
+
+        let mut reopened = fixture.reopen(9, FileOpenFlags::read_only()).await;
+        assert_eq!(reopened.pread(&mut buf, 0).await.unwrap(), buf.len());
+        assert_eq!(&buf, b"aaaaaaaaZZZZZZZZ\0\0\0\0\0\0\0\0");
+
+        drop(reopened);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
     async fn truncate_then_sparse_write_reads_as_zero() {
         let fixture = TestDb::new().await;
         let mut handle = fixture.handle(3, FileOpenFlags::open_or_create());
@@ -638,16 +513,17 @@ mod tests {
     #[tokio::test]
     async fn failed_truncate_preserves_unflushed_writes() {
         let fixture = TestDb::new().await;
-        let mut handle = fixture.handle(5, FileOpenFlags::open_or_create());
+        let (mut handle, store) = fixture.faulty_handle(5, FileOpenFlags::open_or_create());
 
         handle.pwrite(b"abcdefghij", 0).await.unwrap();
         assert_eq!(handle.file_size(), 10);
 
-        handle.inject_store_fault();
+        // A truncation that cannot read the store changes nothing.
+        store.fail_next_operation();
         assert!(matches!(handle.truncate(5).await, Err(Error::SlateDb(_))));
         assert_eq!(handle.file_size(), 10);
 
-        handle.inject_store_fault();
+        store.fail_next_operation();
         assert!(matches!(handle.truncate(0).await, Err(Error::SlateDb(_))));
         assert_eq!(handle.file_size(), 10);
 
