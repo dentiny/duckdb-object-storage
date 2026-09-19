@@ -14,6 +14,9 @@ pub struct IoOperationStats {
 pub struct IoStats {
     pub read: IoOperationStats,
     pub write: IoOperationStats,
+    pub stat: IoOperationStats,
+    pub delete: IoOperationStats,
+    pub list: IoOperationStats,
 }
 
 #[derive(Debug, Default)]
@@ -51,6 +54,9 @@ impl RunningStats {
 pub(crate) struct IoMetrics {
     read: Mutex<RunningStats>,
     write: Mutex<RunningStats>,
+    stat: Mutex<RunningStats>,
+    delete: Mutex<RunningStats>,
+    list: Mutex<RunningStats>,
 }
 
 impl IoMetrics {
@@ -58,6 +64,9 @@ impl IoMetrics {
         IoStats {
             read: lock_or_recover(&self.read).snapshot(),
             write: lock_or_recover(&self.write).snapshot(),
+            stat: lock_or_recover(&self.stat).snapshot(),
+            delete: lock_or_recover(&self.delete).snapshot(),
+            list: lock_or_recover(&self.list).snapshot(),
         }
     }
 
@@ -67,6 +76,18 @@ impl IoMetrics {
 
     pub(crate) fn record_write(&self, duration: Duration) {
         lock_or_recover(&self.write).record(duration);
+    }
+
+    pub(crate) fn record_stat(&self, duration: Duration) {
+        lock_or_recover(&self.stat).record(duration);
+    }
+
+    pub(crate) fn record_delete(&self, duration: Duration) {
+        lock_or_recover(&self.delete).record(duration);
+    }
+
+    pub(crate) fn record_list(&self, duration: Duration) {
+        lock_or_recover(&self.list).record(duration);
     }
 }
 

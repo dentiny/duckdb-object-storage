@@ -113,6 +113,24 @@ pub struct FfiIoStats {
     write_average_latency_ms: f64,
     /// Population standard deviation of OpenDAL write latency in milliseconds.
     write_stddev_latency_ms: f64,
+    /// Number of OpenDAL stat requests.
+    stat_request_count: u64,
+    /// Average OpenDAL stat latency in milliseconds.
+    stat_average_latency_ms: f64,
+    /// Population standard deviation of OpenDAL stat latency in milliseconds.
+    stat_stddev_latency_ms: f64,
+    /// Number of OpenDAL delete requests.
+    delete_request_count: u64,
+    /// Average OpenDAL delete latency in milliseconds.
+    delete_average_latency_ms: f64,
+    /// Population standard deviation of OpenDAL delete latency in milliseconds.
+    delete_stddev_latency_ms: f64,
+    /// Number of OpenDAL list requests.
+    list_request_count: u64,
+    /// Average OpenDAL list latency in milliseconds.
+    list_average_latency_ms: f64,
+    /// Population standard deviation of OpenDAL list latency in milliseconds.
+    list_stddev_latency_ms: f64,
 }
 
 /// Synchronous FFI context owning the one async runtime used by this
@@ -445,6 +463,15 @@ pub unsafe extern "C" fn slatedb_fs_get_io_stats(
             write_request_count: stats.write.request_count,
             write_average_latency_ms: duration_as_milliseconds(stats.write.average_latency),
             write_stddev_latency_ms: duration_as_milliseconds(stats.write.stddev_latency),
+            stat_request_count: stats.stat.request_count,
+            stat_average_latency_ms: duration_as_milliseconds(stats.stat.average_latency),
+            stat_stddev_latency_ms: duration_as_milliseconds(stats.stat.stddev_latency),
+            delete_request_count: stats.delete.request_count,
+            delete_average_latency_ms: duration_as_milliseconds(stats.delete.average_latency),
+            delete_stddev_latency_ms: duration_as_milliseconds(stats.delete.stddev_latency),
+            list_request_count: stats.list.request_count,
+            list_average_latency_ms: duration_as_milliseconds(stats.list.average_latency),
+            list_stddev_latency_ms: duration_as_milliseconds(stats.list.stddev_latency),
         };
         Ok(())
     })
