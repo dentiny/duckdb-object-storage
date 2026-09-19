@@ -34,9 +34,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("duckdb_objfs_persistent_cache_on_compaction",
 	                          "Populate the persistent cache from compaction output", LogicalType::BOOLEAN,
 	                          Value(false));
-	config.AddExtensionOption("duckdb_objfs_persistent_cache_preload",
-	                          "Persistent cache startup preload mode: none, l0, or all", LogicalType::VARCHAR,
-	                          Value("none"));
 	instance.GetFileSystem().RegisterSubSystem(make_uniq<SlateDBFileSystem>());
 }
 

@@ -38,12 +38,6 @@ size_t CheckedSize(int64_t size, const string &operation) {
 }
 
 slatedb_cache_config ConvertCacheConfig(const CacheInitializationConfig &config) {
-	int32_t preload = SLATEDB_PERSISTENT_CACHE_PRELOAD_NONE;
-	if (config.persistent_cache_preload == "l0") {
-		preload = SLATEDB_PERSISTENT_CACHE_PRELOAD_L0;
-	} else if (config.persistent_cache_preload == "all") {
-		preload = SLATEDB_PERSISTENT_CACHE_PRELOAD_ALL;
-	}
 	return {config.block_cache_size_bytes,
 	        config.metadata_cache_size_bytes,
 	        config.cache_shards,
@@ -51,8 +45,7 @@ slatedb_cache_config ConvertCacheConfig(const CacheInitializationConfig &config)
 	        config.persistent_cache_size_bytes,
 	        config.persistent_cache_part_size_bytes,
 	        config.persistent_cache_on_flush,
-	        config.persistent_cache_on_compaction,
-	        preload};
+	        config.persistent_cache_on_compaction};
 }
 
 } // namespace

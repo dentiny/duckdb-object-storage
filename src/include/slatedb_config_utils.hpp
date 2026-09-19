@@ -42,8 +42,6 @@ struct CacheInitializationConfig {
 	bool persistent_cache_on_flush = false;
 	//! Whether compaction output should be inserted into the persistent cache.
 	bool persistent_cache_on_compaction = false;
-	//! Startup preload mode: "none", "l0", or "all".
-	string persistent_cache_preload = "none";
 };
 
 string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name);

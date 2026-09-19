@@ -3,7 +3,7 @@ use std::sync::Arc;
 use object_store_opendal::OpendalStore;
 use opendal::services::{Fs, Memory, S3};
 use opendal::Operator;
-use slatedb::config::{PreloadLevel, Settings};
+use slatedb::config::Settings;
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use slatedb::db_cache::{DbCache, SplitCache};
 use slatedb::Db;
@@ -49,14 +49,6 @@ pub struct S3StorageConfig {
     pub virtual_host_style: bool,
 }
 
-#[derive(Clone, Copy)]
-pub enum PersistentCachePreload {
-    /// Preload only level-zero SSTs.
-    L0,
-    /// Preload both level-zero and compacted SSTs.
-    All,
-}
-
 #[derive(Clone)]
 pub struct CacheConfig {
     /// Maximum bytes retained in the in-memory data-block cache; zero disables it.
@@ -75,8 +67,6 @@ pub struct CacheConfig {
     pub persistent_cache_on_flush: bool,
     /// Whether compaction output should be inserted into the persistent cache.
     pub persistent_cache_on_compaction: bool,
-    /// Optional set of SSTs to preload into the persistent cache at startup.
-    pub persistent_cache_preload: Option<PersistentCachePreload>,
 }
 
 impl Default for CacheConfig {
@@ -90,7 +80,6 @@ impl Default for CacheConfig {
             persistent_cache_part_size_bytes: 4 * 1024 * 1024,
             persistent_cache_on_flush: false,
             persistent_cache_on_compaction: false,
-            persistent_cache_preload: None,
         }
     }
 }
@@ -125,15 +114,6 @@ impl SlateDbFileSystem {
                 cache_config.persistent_cache_on_flush;
             settings.object_store_cache_options.cache_on_compaction =
                 cache_config.persistent_cache_on_compaction;
-            settings
-                .object_store_cache_options
-                .preload_disk_cache_on_startup =
-                cache_config
-                    .persistent_cache_preload
-                    .map(|level| match level {
-                        PersistentCachePreload::L0 => PreloadLevel::L0Sst,
-                        PersistentCachePreload::All => PreloadLevel::AllSst,
-                    });
         }
 
         let mut builder = Db::builder(database_path, object_store).with_settings(settings);

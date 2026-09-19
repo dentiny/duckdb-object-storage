@@ -88,7 +88,6 @@ Default cache settings are:
 - `duckdb_objfs_persistent_cache_size`: 17179869184 bytes (16 GiB, used only
   when a persistent cache path is set);
 - `duckdb_objfs_persistent_cache_part_size`: 4194304 bytes (4 MiB);
-- `duckdb_objfs_persistent_cache_preload`: `none`;
 - `duckdb_objfs_persistent_cache_on_flush`: `false`;
 - `duckdb_objfs_persistent_cache_on_compaction`: `false`.
 
@@ -109,7 +108,6 @@ enable it, which is most useful with the S3 backend:
 SET duckdb_objfs_persistent_cache_path = '/var/cache/duckdb-objfs';
 SET duckdb_objfs_persistent_cache_size = 17179869184;     -- 16 GiB
 SET duckdb_objfs_persistent_cache_part_size = 4194304;    -- 4 MiB
-SET duckdb_objfs_persistent_cache_preload = 'l0';         -- opt in to L0 preload
 SET duckdb_objfs_persistent_cache_on_flush = false;
 SET duckdb_objfs_persistent_cache_on_compaction = false;
 ```

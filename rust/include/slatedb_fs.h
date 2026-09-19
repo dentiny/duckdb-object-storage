@@ -44,12 +44,6 @@ typedef struct slatedb_s3_config {
 	int32_t virtual_host_style;
 } slatedb_s3_config;
 
-typedef enum slatedb_persistent_cache_preload {
-	SLATEDB_PERSISTENT_CACHE_PRELOAD_NONE = 0,
-	SLATEDB_PERSISTENT_CACHE_PRELOAD_L0 = 1,
-	SLATEDB_PERSISTENT_CACHE_PRELOAD_ALL = 2,
-} slatedb_persistent_cache_preload;
-
 typedef struct slatedb_cache_config {
 	// Maximum bytes retained in the in-memory data-block cache; zero disables it.
 	uint64_t block_cache_size_bytes;
@@ -67,8 +61,6 @@ typedef struct slatedb_cache_config {
 	int32_t persistent_cache_on_flush;
 	// Whether compaction output should be inserted into the persistent cache.
 	int32_t persistent_cache_on_compaction;
-	// Which SSTs should be preloaded into the persistent cache at startup.
-	int32_t persistent_cache_preload;
 } slatedb_cache_config;
 
 typedef enum slatedb_fs_error_code {

@@ -89,12 +89,6 @@ CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener>
 	    GetSettingOrDefault<bool>(opener, "duckdb_objfs_persistent_cache_on_flush", result.persistent_cache_on_flush);
 	result.persistent_cache_on_compaction = GetSettingOrDefault<bool>(
 	    opener, "duckdb_objfs_persistent_cache_on_compaction", result.persistent_cache_on_compaction);
-	result.persistent_cache_preload =
-	    StringUtil::Lower(GetSettingOrDefault<string>(opener, "duckdb_objfs_persistent_cache_preload", "none"));
-	if (result.persistent_cache_preload != "none" && result.persistent_cache_preload != "l0" &&
-	    result.persistent_cache_preload != "all") {
-		throw InvalidConfigurationException("duckdb_objfs_persistent_cache_preload must be one of: none, l0, all");
-	}
 	return result;
 }
 

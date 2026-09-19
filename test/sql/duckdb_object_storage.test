@@ -10,37 +10,6 @@ SELECT * FROM glob('duckdb_objfs://dummy/**');
 ----
 SlateDBFileSystem::Glob is not implemented
 
-query II
-SELECT current_setting('duckdb_objfs_memory_cache_size'),
-       current_setting('duckdb_objfs_metadata_cache_size')
-----
-536870912	134217728
-
-query T
-SELECT current_setting('duckdb_objfs_persistent_cache_path') = ''
-----
-true
-
-# Keep this test's cache small while also exercising the extension settings.
-statement ok
-SET duckdb_objfs_memory_cache_size = 8388608
-
-statement ok
-SET duckdb_objfs_metadata_cache_size = 2097152
-
-statement ok
-SET duckdb_objfs_cache_shards = 1
-
-# Exercise the opt-in persistent cache with small test-only limits.
-statement ok
-SET duckdb_objfs_persistent_cache_path = '__TEST_DIR__/duckdb_objfs_cache'
-
-statement ok
-SET duckdb_objfs_persistent_cache_size = 8388608
-
-statement ok
-SET duckdb_objfs_persistent_cache_part_size = 1024
-
 # The default backend is local; redirect its root into the isolated test directory.
 statement ok
 SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_local'

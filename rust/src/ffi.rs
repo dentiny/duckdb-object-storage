@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::{FileHandle, SlateFileHandle};
 use crate::flags::FileOpenFlags;
-use crate::fs::{CacheConfig, PersistentCachePreload, S3StorageConfig, SlateDbFileSystem};
+use crate::fs::{CacheConfig, S3StorageConfig, SlateDbFileSystem};
 
 const DATABASE_PATH: &str = "duckdb-object-storage";
 
@@ -70,8 +70,6 @@ pub struct FfiCacheConfig {
     persistent_cache_on_flush: i32,
     /// Whether compaction output should be inserted into the persistent cache.
     persistent_cache_on_compaction: i32,
-    /// Which SSTs should be preloaded into the persistent cache at startup.
-    persistent_cache_preload: i32,
 }
 
 /// Synchronous FFI context owning the one async runtime used by this
@@ -198,17 +196,6 @@ unsafe fn parse_cache_config(config: *const FfiCacheConfig) -> Result<CacheConfi
                 .map_err(|_| invalid_argument("cache shard count does not fit this platform"))?,
         ),
     };
-    let persistent_cache_preload = match config.persistent_cache_preload {
-        0 => None,
-        1 => Some(PersistentCachePreload::L0),
-        2 => Some(PersistentCachePreload::All),
-        value => {
-            return Err(invalid_argument(format!(
-                "invalid persistent cache preload value: {value}"
-            )))
-        }
-    };
-
     Ok(CacheConfig {
         block_cache_size_bytes: config.block_cache_size_bytes,
         metadata_cache_size_bytes: config.metadata_cache_size_bytes,
@@ -218,7 +205,6 @@ unsafe fn parse_cache_config(config: *const FfiCacheConfig) -> Result<CacheConfi
         persistent_cache_part_size_bytes,
         persistent_cache_on_flush: config.persistent_cache_on_flush != 0,
         persistent_cache_on_compaction: config.persistent_cache_on_compaction != 0,
-        persistent_cache_preload,
     })
 }
 
