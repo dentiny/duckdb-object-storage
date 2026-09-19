@@ -95,6 +95,12 @@ TEST_CASE("SlateDBFileSystem maps DuckDB open flags", "[slatedb_fs]") {
 		REQUIRE(fs->Write(*handle, initial.data(), initial.size()) == 3);
 		handle->Close();
 
+		auto exclusive_create =
+		    FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE | FileFlags::FILE_FLAGS_EXCLUSIVE_CREATE;
+		REQUIRE_THROWS_AS(fs->OpenFile(path, exclusive_create), IOException);
+		handle = fs->OpenFile(path, exclusive_create | FileFlags::FILE_FLAGS_NULL_IF_EXISTS);
+		REQUIRE(!handle);
+
 		handle = fs->OpenFile(path, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
 		REQUIRE(fs->GetFileSize(*handle) == 0);
 		handle->Close();

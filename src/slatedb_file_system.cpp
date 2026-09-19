@@ -23,6 +23,7 @@ slatedb_fs_open_options ConvertOpenFlags(FileOpenFlags flags) {
 	options.create = flags.CreateFileIfNotExists() || flags.OverwriteExistingFile();
 	options.append = flags.OpenForAppending();
 	options.truncate_existing = flags.OverwriteExistingFile();
+	options.exclusive_create = flags.ExclusiveCreate();
 	return options;
 }
 

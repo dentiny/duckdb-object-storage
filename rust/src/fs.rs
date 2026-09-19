@@ -173,7 +173,12 @@ impl SlateDbFileSystem {
         })?);
         let database_metadata = DatabaseMetadata::new(Arc::clone(&db));
         let (file_id, metadata) = database_metadata
-            .prepare_file_for_open(path, flags.create, flags.truncate_existing)
+            .prepare_file_for_open(
+                path,
+                flags.create,
+                flags.truncate_existing,
+                flags.exclusive_create,
+            )
             .await?;
 
         SlateFileHandle::new(db, file_id, metadata, flags)

@@ -29,6 +29,7 @@ pub struct FfiOpenOptions {
     append: i32,
     /// Clear an existing file when it is opened.
     truncate_existing: i32,
+    exclusive_create: i32,
 }
 
 #[repr(C)]
@@ -278,6 +279,7 @@ unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlag
         create: options.create != 0,
         append: options.append != 0,
         truncate_existing: options.truncate_existing != 0,
+        exclusive_create: options.exclusive_create != 0,
     })
 }
 
@@ -736,6 +738,7 @@ mod tests {
             create: 1,
             append: 0,
             truncate_existing: 0,
+            exclusive_create: 0,
         }
     }
 
@@ -746,6 +749,7 @@ mod tests {
             create: 0,
             append: 0,
             truncate_existing: 0,
+            exclusive_create: 0,
         }
     }
 
