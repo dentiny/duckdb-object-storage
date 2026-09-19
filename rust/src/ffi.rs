@@ -8,11 +8,12 @@ use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Runtime;
 
+use crate::cache::CacheConfig;
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::{FileHandle, SlateFileHandle};
 use crate::flags::FileOpenFlags;
-use crate::fs::{CacheConfig, S3StorageConfig, SlateDbFileSystem};
+use crate::fs::{S3StorageConfig, SlateDbFileSystem};
 
 const DATABASE_PATH: &str = "duckdb-object-storage";
 

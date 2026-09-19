@@ -93,8 +93,7 @@ void CacheStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &o
 	idx_t count = 0;
 	while (state.offset < 3 && count < STANDARD_VECTOR_SIZE) {
 		if (state.offset == 0) {
-			SetCommonValues(output, count, "memory_data", state.stats.block_cache_hits,
-			                state.stats.block_cache_misses);
+			SetCommonValues(output, count, "memory_data", state.stats.block_cache_hits, state.stats.block_cache_misses);
 			output.SetValue(4, count, Value());
 			output.SetValue(5, count, Value());
 			output.SetValue(6, count, Value());

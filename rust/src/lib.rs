@@ -3,6 +3,7 @@
 //! Handle I/O lives in [`file_handle`]. The C ABI in [`ffi`] is consumed by the
 //! C++ `FileSystem` adapter; opening paths through VFS is not wired yet.
 
+mod cache;
 mod database_metadata;
 mod error;
 mod error_struct;
@@ -14,6 +15,7 @@ mod fs;
 mod keys;
 mod util;
 
+pub use cache::{CacheConfig, CacheStats};
 pub use error::{Error, ErrorCode, Result};
 pub use error_struct::{ErrorStatus, ErrorStruct};
 pub use file_handle::{FileHandle, SlateFileHandle};
