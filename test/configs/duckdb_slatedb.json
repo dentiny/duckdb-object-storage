@@ -1,6 +1,6 @@
 {
   "description": "Run DuckDB SQLLogicTests against the on-disk SlateDB-backed filesystem.",
-  "on_init": "SET duckdb_objfs_backend = 'local'; SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_local'; ATTACH 'duckdb_objfs://{BASE_TEST_NAME}.db' AS __test__config__slatedb;",
+  "on_init": "SET duckdb_objfs_backend = 'local'; SET duckdb_objfs_root = '__TEST_DIR___slatedb'; ATTACH 'duckdb_objfs://{BASE_TEST_NAME}.db' AS __test__config__slatedb;",
   "on_new_connection": "USE __test__config__slatedb;",
   "skip_compiled": true,
   "statically_loaded_extensions": [

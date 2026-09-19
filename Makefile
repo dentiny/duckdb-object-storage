@@ -35,13 +35,20 @@ $(DUCKDB_TEST_ARGUMENTS):
 endif
 endif
 
+define RUN_DUCKDB_TESTS
+TEST_RUN_ROOT=$$(mktemp -d "$${TMPDIR:-/tmp}/duckdb-object-storage-test.XXXXXX"); \
+trap 'rm -rf "$$TEST_RUN_ROOT"' EXIT INT TERM; \
+./build/$(1)/test/unittest --test-config $(DUCKDB_TEST_CONFIG) --test-dir duckdb \
+	--test-temp-dir "$$TEST_RUN_ROOT/duckdb" $(if $(DUCKDB_TEST_FILTER),"$(DUCKDB_TEST_FILTER)")
+endef
+
 test_debug_duckdb:
-	./build/debug/test/unittest --test-config $(DUCKDB_TEST_CONFIG) --test-dir duckdb $(if $(DUCKDB_TEST_FILTER),"$(DUCKDB_TEST_FILTER)")
+	@$(call RUN_DUCKDB_TESTS,debug)
 
 test_reldebug_duckdb:
-	./build/reldebug/test/unittest --test-config $(DUCKDB_TEST_CONFIG) --test-dir duckdb $(if $(DUCKDB_TEST_FILTER),"$(DUCKDB_TEST_FILTER)")
+	@$(call RUN_DUCKDB_TESTS,reldebug)
 
 test_release_duckdb:
-	./build/release/test/unittest --test-config $(DUCKDB_TEST_CONFIG) --test-dir duckdb $(if $(DUCKDB_TEST_FILTER),"$(DUCKDB_TEST_FILTER)")
+	@$(call RUN_DUCKDB_TESTS,release)
 
 .PHONY: format-all test-s3 $(DUCKDB_TEST_TARGETS)
