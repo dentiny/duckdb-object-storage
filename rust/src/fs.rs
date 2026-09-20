@@ -3,17 +3,18 @@ use std::sync::Arc;
 use object_store_opendal::OpendalStore;
 use opendal::services::{Fs, Memory, S3};
 use opendal::Operator;
-use slatedb::config::Settings;
-use slatedb::Db;
+use slatedb::config::{DbReaderOptions, Settings};
+use slatedb::{Db, DbReader, DbReaderMode, ErrorKind as SlateDbErrorKind};
 
 use crate::cache::{CacheConfig, CacheMetrics};
-use crate::database_metadata::DatabaseMetadata;
+use crate::database_metadata::{DatabaseMetadata, ReadOnlyDatabaseMetadata};
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::SlateFileHandle;
 use crate::flags::FileOpenFlags;
 use crate::io_metrics::IoMetrics;
 use crate::opendal_io_metrics_layer::IoMetricsLayer;
+use crate::read_only_file_handle::SlateReadOnlyFileHandle;
 
 /// URL scheme claimed by this filesystem in DuckDB's virtual filesystem.
 pub const PREFIX: &str = "duckdb_objfs:";
@@ -27,6 +28,16 @@ pub const NAME: &str = "SlateDBFileSystem";
 /// owns the runtime used to drive these asynchronous operations.
 pub struct SlateDbFileSystem {
     db: Option<Arc<Db>>,
+    pub(crate) cache_metrics: CacheMetrics,
+    pub(crate) io_metrics: Arc<IoMetrics>,
+}
+
+/// Read-only SlateDB filesystem owner.
+///
+/// This uses [`DbReader`] rather than [`Db`], so opening it never takes over
+/// the SlateDB writer epoch or fences an active writer.
+pub(crate) struct SlateDbReadOnlyFileSystem {
+    reader: Option<Arc<DbReader>>,
     pub(crate) cache_metrics: CacheMetrics,
     pub(crate) io_metrics: Arc<IoMetrics>,
 }
@@ -234,6 +245,152 @@ impl SlateDbFileSystem {
     }
 }
 
+impl SlateDbReadOnlyFileSystem {
+    pub async fn open_with_cache_config(
+        database_path: &str,
+        operator: Operator,
+        cache_config: CacheConfig,
+    ) -> Result<Self> {
+        if database_path.is_empty() {
+            return Err(Error::InvalidArgument(ErrorStruct::new(
+                "database path must not be empty".to_string(),
+                ErrorStatus::Permanent,
+            )));
+        }
+
+        let io_metrics = Arc::new(IoMetrics::default());
+        let operator = operator.layer(IoMetricsLayer::new(Arc::clone(&io_metrics)));
+        let object_store = Arc::new(OpendalStore::new(operator));
+        let cache_metrics = CacheMetrics::new();
+        let mut options = DbReaderOptions::default();
+        cache_config.apply_to_reader_options(&mut options);
+
+        let mut builder = DbReader::builder(database_path, object_store)
+            .with_reader_mode(DbReaderMode::ManagedCheckpoint)
+            .with_options(options)
+            .with_metrics_recorder(cache_metrics.recorder());
+        match cache_config.build_db_cache() {
+            Some(cache) => builder = builder.with_db_cache(cache),
+            None => builder = builder.with_db_cache_disabled(),
+        }
+        let reader = match builder.build().await {
+            Ok(reader) => Some(Arc::new(reader)),
+            Err(error)
+                if error.kind() == SlateDbErrorKind::Data
+                    && error
+                        .to_string()
+                        .contains("failed to find latest transactional object") =>
+            {
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Self {
+            reader,
+            cache_metrics,
+            io_metrics,
+        })
+    }
+
+    pub async fn open_in_memory_with_cache_config(
+        database_path: &str,
+        cache_config: CacheConfig,
+    ) -> Result<Self> {
+        let operator = Operator::new(Memory::default()).map_err(|source| {
+            Error::Io(
+                ErrorStruct::new(
+                    "failed to initialize OpenDAL memory storage".to_string(),
+                    ErrorStatus::Permanent,
+                )
+                .with_source(source),
+            )
+        })?;
+        Self::open_with_cache_config(database_path, operator, cache_config).await
+    }
+
+    pub async fn open_local_with_cache_config(
+        database_path: &str,
+        root: impl AsRef<std::path::Path>,
+        cache_config: CacheConfig,
+    ) -> Result<Self> {
+        let root = root.as_ref().to_path_buf();
+        let root_str = root.to_str().ok_or_else(|| {
+            Error::InvalidArgument(ErrorStruct::new(
+                format!("local OpenDAL root is not valid UTF-8: {}", root.display()),
+                ErrorStatus::Permanent,
+            ))
+        })?;
+        tokio::fs::create_dir_all(&root).await?;
+
+        let operator = Operator::new(Fs::default().root(root_str)).map_err(|source| {
+            Error::Io(
+                ErrorStruct::new(
+                    format!("failed to initialize OpenDAL storage at {}", root.display()),
+                    ErrorStatus::Permanent,
+                )
+                .with_source(source),
+            )
+        })?;
+        Self::open_with_cache_config(database_path, operator, cache_config).await
+    }
+
+    pub async fn open_s3_with_cache_config(
+        database_path: &str,
+        config: S3StorageConfig,
+        cache_config: CacheConfig,
+    ) -> Result<Self> {
+        let operator = build_s3_operator(config)?;
+        Self::open_with_cache_config(database_path, operator, cache_config).await
+    }
+
+    pub async fn open_file(
+        &self,
+        path: &str,
+        flags: FileOpenFlags,
+    ) -> Result<SlateReadOnlyFileHandle> {
+        flags.validate()?;
+        if flags.write || flags.create || flags.append || flags.truncate_existing {
+            return Err(Error::ReadOnlyViolation(ErrorStruct::new(
+                "read-only SlateDB filesystem cannot open a writable file".to_string(),
+                ErrorStatus::Permanent,
+            )));
+        }
+
+        let reader = Arc::clone(self.reader.as_ref().ok_or_else(|| {
+            Error::FileNotFound(ErrorStruct::new(
+                format!("file not found: {path}"),
+                ErrorStatus::Permanent,
+            ))
+        })?);
+        let (file_id, metadata) = ReadOnlyDatabaseMetadata::new(Arc::clone(&reader))
+            .open_file(path)
+            .await?;
+        SlateReadOnlyFileHandle::new(reader, file_id, metadata, flags)
+    }
+
+    pub async fn file_exists(&self, path: &str) -> Result<bool> {
+        let Some(reader) = &self.reader else {
+            return Ok(false);
+        };
+        let reader = Arc::clone(reader);
+        ReadOnlyDatabaseMetadata::new(reader)
+            .file_exists(path)
+            .await
+    }
+
+    pub async fn close(&mut self) -> Result<()> {
+        let Some(reader) = self.reader.take() else {
+            return Ok(());
+        };
+        reader.close().await?;
+        Ok(())
+    }
+
+    pub fn can_handle(&self, path: &str) -> bool {
+        path.starts_with(PREFIX)
+    }
+}
+
 fn build_s3_operator(config: S3StorageConfig) -> Result<Operator> {
     if config.bucket.is_empty() {
         return Err(Error::InvalidArgument(ErrorStruct::new(
@@ -385,6 +542,55 @@ mod tests {
         reopened.close().await.expect("close file");
         drop(reopened);
         second.close().await.expect("second close");
+    }
+
+    #[tokio::test]
+    async fn read_only_client_does_not_fence_active_writer() {
+        let root = tempdir().expect("temporary object-store root");
+        let mut writer = SlateDbFileSystem::open_local("shared-db", root.path())
+            .await
+            .expect("writer");
+        let mut created = writer
+            .open_file("database.db", FileOpenFlags::open_or_create())
+            .await
+            .expect("create file");
+        created.write(b"before").await.expect("write file");
+        created.close().await.expect("close file");
+        drop(created);
+
+        let mut reader = SlateDbReadOnlyFileSystem::open_local_with_cache_config(
+            "shared-db",
+            root.path(),
+            CacheConfig::default(),
+        )
+        .await
+        .expect("reader");
+        let mut read_handle = reader
+            .open_file("database.db", FileOpenFlags::read_only())
+            .await
+            .expect("open through reader");
+        let mut contents = [0; 6];
+        assert_eq!(
+            read_handle.read(&mut contents).await.expect("read file"),
+            contents.len()
+        );
+        assert_eq!(&contents, b"before");
+        read_handle.close().await.expect("close reader handle");
+        drop(read_handle);
+
+        let mut writable = writer
+            .open_file("database.db", FileOpenFlags::read_write())
+            .await
+            .expect("writer remains usable");
+        writable
+            .pwrite(b"after", 0)
+            .await
+            .expect("write after reader opens");
+        writable.close().await.expect("close writer handle");
+        drop(writable);
+
+        reader.close().await.expect("close reader");
+        writer.close().await.expect("close writer");
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use slatedb::bytes::Bytes;
-use slatedb::Db;
+use slatedb::{Db, DbReader};
 
 #[cfg(test)]
 use crate::error::Error;
@@ -52,6 +52,42 @@ impl ChunkStore for SlateDbChunkStore {
 
     async fn keys_with_prefix(&self, prefix: &[u8]) -> Result<Vec<Bytes>> {
         let mut iter = self.db.scan_prefix(prefix, ..).await?;
+        let mut keys = Vec::new();
+        while let Some(kv) = iter.next().await? {
+            keys.push(kv.key);
+        }
+        Ok(keys)
+    }
+}
+
+/// Reads served through SlateDB's non-fencing read-only client.
+pub(crate) struct SlateDbReaderChunkStore {
+    reader: Arc<DbReader>,
+}
+
+impl SlateDbReaderChunkStore {
+    pub(crate) fn new(reader: Arc<DbReader>) -> Self {
+        Self { reader }
+    }
+}
+
+#[async_trait]
+impl ChunkStore for SlateDbReaderChunkStore {
+    async fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        Ok(self.reader.get(key).await?)
+    }
+
+    async fn scan_inclusive(&self, first: &[u8], last: &[u8]) -> Result<Vec<(Bytes, Bytes)>> {
+        let mut iter = self.reader.scan(first..=last).await?;
+        let mut pairs = Vec::new();
+        while let Some(kv) = iter.next().await? {
+            pairs.push((kv.key, kv.value));
+        }
+        Ok(pairs)
+    }
+
+    async fn keys_with_prefix(&self, prefix: &[u8]) -> Result<Vec<Bytes>> {
+        let mut iter = self.reader.scan_prefix(prefix, ..).await?;
         let mut keys = Vec::new();
         while let Some(kv) = iter.next().await? {
             keys.push(kv.key);

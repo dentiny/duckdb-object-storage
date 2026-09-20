@@ -17,6 +17,7 @@ mod fs;
 mod io_metrics;
 mod keys;
 mod opendal_io_metrics_layer;
+mod read_only_file_handle;
 mod util;
 
 pub use cache::{CacheConfig, CacheStats};

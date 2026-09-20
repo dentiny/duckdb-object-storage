@@ -2,13 +2,12 @@
 
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "slatedb_config_utils.hpp"
 #include "slatedb_fs.h"
 
 #include <memory>
 
 namespace duckdb {
-
-struct CacheInitializationConfig;
 
 struct SlateDBFsDeleter {
 	void operator()(slatedb_fs *ptr) const;
@@ -51,14 +50,24 @@ public:
 	bool TryGetIoStats(slatedb_io_stats &stats);
 
 private:
+	struct InitializationConfig {
+		string backend;
+		string local_root;
+		S3InitializationConfig s3;
+		CacheInitializationConfig cache;
+	};
+
 	void EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> opener);
-	void InitializeMemory(const CacheInitializationConfig &cache);
-	void InitializeLocal(const string &root, const CacheInitializationConfig &cache);
-	void InitializeS3(optional_ptr<FileOpener> opener, const CacheInitializationConfig &cache);
-	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener);
+	void InitializeMemory(const CacheInitializationConfig &cache, bool read_only);
+	void InitializeLocal(const string &root, const CacheInitializationConfig &cache, bool read_only);
+	void InitializeS3(const S3InitializationConfig &config, const CacheInitializationConfig &cache, bool read_only);
+	InitializationConfig ReadInitializationConfig(optional_ptr<FileOpener> opener);
+	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener, bool read_only);
 
 	mutex initialization_lock;
-	unique_ptr<slatedb_fs, SlateDBFsDeleter> impl;
+	unique_ptr<InitializationConfig> initialization_config;
+	unique_ptr<slatedb_fs, SlateDBFsDeleter> read_write_impl;
+	unique_ptr<slatedb_fs, SlateDBFsDeleter> read_only_impl;
 };
 
 } // namespace duckdb

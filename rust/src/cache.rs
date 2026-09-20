@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use slatedb::config::Settings;
+use slatedb::config::{DbReaderOptions, Settings};
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use slatedb::db_cache::{DbCache, SplitCache};
 use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue, Metrics};
 
-use crate::fs::SlateDbFileSystem;
+use crate::fs::{SlateDbFileSystem, SlateDbReadOnlyFileSystem};
 
 #[derive(Clone)]
 pub struct CacheConfig {
@@ -56,6 +56,16 @@ impl CacheConfig {
             self.persistent_cache_on_compaction;
     }
 
+    pub(crate) fn apply_to_reader_options(&self, options: &mut DbReaderOptions) {
+        let Some(path) = &self.persistent_cache_path else {
+            return;
+        };
+        options.object_store_cache_options.root_folder = Some(path.clone());
+        options.object_store_cache_options.max_cache_size_bytes =
+            Some(self.persistent_cache_size_bytes);
+        options.object_store_cache_options.part_size_bytes = self.persistent_cache_part_size_bytes;
+    }
+
     pub(crate) fn build_db_cache(&self) -> Option<Arc<dyn DbCache>> {
         if self.block_cache_size_bytes == 0 && self.metadata_cache_size_bytes == 0 {
             return None;
@@ -103,60 +113,70 @@ impl CacheMetrics {
 
 impl SlateDbFileSystem {
     pub fn cache_stats(&self) -> CacheStats {
-        const DB_CACHE_ACCESS_COUNT: &str = "slatedb.db_cache.access_count";
-        const PERSISTENT_HIT_COUNT: &str = "slatedb.object_store_cache.part_hit_count";
-        const PERSISTENT_ACCESS_COUNT: &str = "slatedb.object_store_cache.part_access_count";
-        const PERSISTENT_CACHE_KEYS: &str = "slatedb.object_store_cache.cache_keys";
-        const PERSISTENT_CACHE_BYTES: &str = "slatedb.object_store_cache.cache_bytes";
-        const PERSISTENT_EVICTED_KEYS: &str = "slatedb.object_store_cache.evicted_keys";
-        const PERSISTENT_EVICTED_BYTES: &str = "slatedb.object_store_cache.evicted_bytes";
+        cache_stats(&self.cache_metrics)
+    }
+}
 
-        let metrics = self.cache_metrics.recorder.snapshot();
-        let block_hits = metric_counter(
-            &metrics,
-            DB_CACHE_ACCESS_COUNT,
-            &[("entry_kind", "data_block"), ("result", "hit")],
-        );
-        let block_misses = metric_counter(
-            &metrics,
-            DB_CACHE_ACCESS_COUNT,
-            &[("entry_kind", "data_block"), ("result", "miss")],
-        );
-        let metadata_hits = ["filter", "index", "stats"]
-            .iter()
-            .map(|entry_kind| {
-                metric_counter(
-                    &metrics,
-                    DB_CACHE_ACCESS_COUNT,
-                    &[("entry_kind", entry_kind), ("result", "hit")],
-                )
-            })
-            .sum();
-        let metadata_misses = ["filter", "index", "stats"]
-            .iter()
-            .map(|entry_kind| {
-                metric_counter(
-                    &metrics,
-                    DB_CACHE_ACCESS_COUNT,
-                    &[("entry_kind", entry_kind), ("result", "miss")],
-                )
-            })
-            .sum();
-        let persistent_hits = metric_counter(&metrics, PERSISTENT_HIT_COUNT, &[]);
-        let persistent_accesses = metric_counter(&metrics, PERSISTENT_ACCESS_COUNT, &[]);
+impl SlateDbReadOnlyFileSystem {
+    pub fn cache_stats(&self) -> CacheStats {
+        cache_stats(&self.cache_metrics)
+    }
+}
 
-        CacheStats {
-            block_cache_hits: block_hits,
-            block_cache_misses: block_misses,
-            metadata_cache_hits: metadata_hits,
-            metadata_cache_misses: metadata_misses,
-            persistent_cache_hits: persistent_hits,
-            persistent_cache_misses: persistent_accesses.saturating_sub(persistent_hits),
-            persistent_cache_entries: metric_gauge(&metrics, PERSISTENT_CACHE_KEYS, &[]),
-            persistent_cache_size_bytes: metric_gauge(&metrics, PERSISTENT_CACHE_BYTES, &[]),
-            persistent_cache_evictions: metric_counter(&metrics, PERSISTENT_EVICTED_KEYS, &[]),
-            persistent_cache_evicted_bytes: metric_counter(&metrics, PERSISTENT_EVICTED_BYTES, &[]),
-        }
+fn cache_stats(cache_metrics: &CacheMetrics) -> CacheStats {
+    const DB_CACHE_ACCESS_COUNT: &str = "slatedb.db_cache.access_count";
+    const PERSISTENT_HIT_COUNT: &str = "slatedb.object_store_cache.part_hit_count";
+    const PERSISTENT_ACCESS_COUNT: &str = "slatedb.object_store_cache.part_access_count";
+    const PERSISTENT_CACHE_KEYS: &str = "slatedb.object_store_cache.cache_keys";
+    const PERSISTENT_CACHE_BYTES: &str = "slatedb.object_store_cache.cache_bytes";
+    const PERSISTENT_EVICTED_KEYS: &str = "slatedb.object_store_cache.evicted_keys";
+    const PERSISTENT_EVICTED_BYTES: &str = "slatedb.object_store_cache.evicted_bytes";
+
+    let metrics = cache_metrics.recorder.snapshot();
+    let block_hits = metric_counter(
+        &metrics,
+        DB_CACHE_ACCESS_COUNT,
+        &[("entry_kind", "data_block"), ("result", "hit")],
+    );
+    let block_misses = metric_counter(
+        &metrics,
+        DB_CACHE_ACCESS_COUNT,
+        &[("entry_kind", "data_block"), ("result", "miss")],
+    );
+    let metadata_hits = ["filter", "index", "stats"]
+        .iter()
+        .map(|entry_kind| {
+            metric_counter(
+                &metrics,
+                DB_CACHE_ACCESS_COUNT,
+                &[("entry_kind", entry_kind), ("result", "hit")],
+            )
+        })
+        .sum();
+    let metadata_misses = ["filter", "index", "stats"]
+        .iter()
+        .map(|entry_kind| {
+            metric_counter(
+                &metrics,
+                DB_CACHE_ACCESS_COUNT,
+                &[("entry_kind", entry_kind), ("result", "miss")],
+            )
+        })
+        .sum();
+    let persistent_hits = metric_counter(&metrics, PERSISTENT_HIT_COUNT, &[]);
+    let persistent_accesses = metric_counter(&metrics, PERSISTENT_ACCESS_COUNT, &[]);
+
+    CacheStats {
+        block_cache_hits: block_hits,
+        block_cache_misses: block_misses,
+        metadata_cache_hits: metadata_hits,
+        metadata_cache_misses: metadata_misses,
+        persistent_cache_hits: persistent_hits,
+        persistent_cache_misses: persistent_accesses.saturating_sub(persistent_hits),
+        persistent_cache_entries: metric_gauge(&metrics, PERSISTENT_CACHE_KEYS, &[]),
+        persistent_cache_size_bytes: metric_gauge(&metrics, PERSISTENT_CACHE_BYTES, &[]),
+        persistent_cache_evictions: metric_counter(&metrics, PERSISTENT_EVICTED_KEYS, &[]),
+        persistent_cache_evicted_bytes: metric_counter(&metrics, PERSISTENT_EVICTED_BYTES, &[]),
     }
 }
 

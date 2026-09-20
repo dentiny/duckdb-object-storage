@@ -11,9 +11,9 @@ use tokio::runtime::Runtime;
 use crate::cache::CacheConfig;
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
-use crate::file_handle::{FileHandle, SlateFileHandle};
+use crate::file_handle::FileHandle;
 use crate::flags::FileOpenFlags;
-use crate::fs::{S3StorageConfig, SlateDbFileSystem};
+use crate::fs::{S3StorageConfig, SlateDbFileSystem, SlateDbReadOnlyFileSystem};
 
 const DATABASE_PATH: &str = "duckdb-object-storage";
 
@@ -71,6 +71,12 @@ pub struct FfiCacheConfig {
     persistent_cache_on_flush: i32,
     /// Whether compaction output should be inserted into the persistent cache.
     persistent_cache_on_compaction: i32,
+}
+
+#[repr(C)]
+pub struct FfiDatabaseConfig {
+    /// Open the SlateDB database without acquiring a writer epoch.
+    read_only: i32,
 }
 
 #[repr(C)]
@@ -137,12 +143,17 @@ pub struct FfiIoStats {
 /// filesystem instance.
 pub struct FfiFileSystem {
     runtime: Arc<Runtime>,
-    fs: SlateDbFileSystem,
+    fs: FfiFileSystemKind,
+}
+
+enum FfiFileSystemKind {
+    ReadWrite(SlateDbFileSystem),
+    ReadOnly(SlateDbReadOnlyFileSystem),
 }
 
 pub struct FfiFileHandle {
     runtime: Arc<Runtime>,
-    handle: Mutex<Option<SlateFileHandle>>,
+    handle: Mutex<Option<Box<dyn FileHandle + Send>>>,
 }
 
 thread_local! {
@@ -281,6 +292,16 @@ unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlag
     })
 }
 
+unsafe fn require_database_config(config: *const FfiDatabaseConfig) -> Result<bool> {
+    let config = unsafe { config.as_ref() }
+        .ok_or_else(|| invalid_argument("database config must not be null"))?;
+    match config.read_only {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(invalid_argument("database config read_only must be 0 or 1")),
+    }
+}
+
 unsafe fn require_output<'a, T>(output: *mut T, name: &str) -> Result<&'a mut T> {
     unsafe { output.as_mut() }.ok_or_else(|| invalid_argument(format!("{name} must not be null")))
 }
@@ -291,7 +312,7 @@ fn duration_as_milliseconds(duration: std::time::Duration) -> f64 {
 
 unsafe fn with_file_handle<T>(
     handle: *const FfiFileHandle,
-    operation: impl FnOnce(&Runtime, &mut SlateFileHandle) -> Result<T>,
+    operation: impl FnOnce(&Runtime, &mut (dyn FileHandle + Send)) -> Result<T>,
 ) -> Result<T> {
     let handle = unsafe { handle.as_ref() }
         .ok_or_else(|| invalid_argument("file handle pointer must not be null"))?;
@@ -302,7 +323,7 @@ unsafe fn with_file_handle<T>(
     let file = guard
         .as_mut()
         .ok_or_else(|| invalid_argument("file handle is closed"))?;
-    operation(&handle.runtime, file)
+    operation(&handle.runtime, file.as_mut())
 }
 
 unsafe fn read_buffer<'a>(buffer: *mut u8, len: usize) -> Result<&'a mut [u8]> {
@@ -348,17 +369,27 @@ fn create_runtime() -> Result<Arc<Runtime>> {
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_fs_create_memory(
     cache_config: *const FfiCacheConfig,
+    database_config: *const FfiDatabaseConfig,
     output: *mut *mut FfiFileSystem,
 ) -> i32 {
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
+        let read_only = unsafe { require_database_config(database_config)? };
         let cache_config = unsafe { parse_cache_config(cache_config)? };
         let runtime = create_runtime()?;
-        let fs = runtime.block_on(SlateDbFileSystem::open_in_memory_with_cache_config(
-            DATABASE_PATH,
-            cache_config,
-        ))?;
+        let fs = if read_only {
+            FfiFileSystemKind::ReadOnly(runtime.block_on(
+                SlateDbReadOnlyFileSystem::open_in_memory_with_cache_config(
+                    DATABASE_PATH,
+                    cache_config,
+                ),
+            )?)
+        } else {
+            FfiFileSystemKind::ReadWrite(runtime.block_on(
+                SlateDbFileSystem::open_in_memory_with_cache_config(DATABASE_PATH, cache_config),
+            )?)
+        };
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
     })
@@ -368,22 +399,32 @@ pub unsafe extern "C" fn slatedb_fs_create_memory(
 pub unsafe extern "C" fn slatedb_fs_create_local(
     root: *const c_char,
     cache_config: *const FfiCacheConfig,
+    database_config: *const FfiDatabaseConfig,
     output: *mut *mut FfiFileSystem,
 ) -> i32 {
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
+        let read_only = unsafe { require_database_config(database_config)? };
         let root = unsafe { require_path(root, "local root")? };
         if root.is_empty() {
             return Err(invalid_argument("local root must not be empty"));
         }
         let cache_config = unsafe { parse_cache_config(cache_config)? };
         let runtime = create_runtime()?;
-        let fs = runtime.block_on(SlateDbFileSystem::open_local_with_cache_config(
-            DATABASE_PATH,
-            root,
-            cache_config,
-        ))?;
+        let fs = if read_only {
+            FfiFileSystemKind::ReadOnly(runtime.block_on(
+                SlateDbReadOnlyFileSystem::open_local_with_cache_config(
+                    DATABASE_PATH,
+                    root,
+                    cache_config,
+                ),
+            )?)
+        } else {
+            FfiFileSystemKind::ReadWrite(runtime.block_on(
+                SlateDbFileSystem::open_local_with_cache_config(DATABASE_PATH, root, cache_config),
+            )?)
+        };
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
     })
@@ -393,19 +434,29 @@ pub unsafe extern "C" fn slatedb_fs_create_local(
 pub unsafe extern "C" fn slatedb_fs_create_s3(
     config: *const FfiS3Config,
     cache_config: *const FfiCacheConfig,
+    database_config: *const FfiDatabaseConfig,
     output: *mut *mut FfiFileSystem,
 ) -> i32 {
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
+        let read_only = unsafe { require_database_config(database_config)? };
         let config = unsafe { require_s3_config(config)? };
         let cache_config = unsafe { parse_cache_config(cache_config)? };
         let runtime = create_runtime()?;
-        let fs = runtime.block_on(SlateDbFileSystem::open_s3_with_cache_config(
-            DATABASE_PATH,
-            config,
-            cache_config,
-        ))?;
+        let fs = if read_only {
+            FfiFileSystemKind::ReadOnly(runtime.block_on(
+                SlateDbReadOnlyFileSystem::open_s3_with_cache_config(
+                    DATABASE_PATH,
+                    config,
+                    cache_config,
+                ),
+            )?)
+        } else {
+            FfiFileSystemKind::ReadWrite(runtime.block_on(
+                SlateDbFileSystem::open_s3_with_cache_config(DATABASE_PATH, config, cache_config),
+            )?)
+        };
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
     })
@@ -418,7 +469,14 @@ pub unsafe extern "C" fn slatedb_fs_destroy(fs: *mut FfiFileSystem) {
     }
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let mut fs = unsafe { Box::from_raw(fs) };
-        let _ = fs.runtime.block_on(fs.fs.close());
+        match &mut fs.fs {
+            FfiFileSystemKind::ReadWrite(inner) => {
+                let _ = fs.runtime.block_on(inner.close());
+            }
+            FfiFileSystemKind::ReadOnly(inner) => {
+                let _ = fs.runtime.block_on(inner.close());
+            }
+        }
     }));
 }
 
@@ -430,7 +488,10 @@ pub unsafe extern "C" fn slatedb_fs_get_cache_stats(
     ffi_result(|| {
         let fs = unsafe { require_fs(fs)? };
         let output = unsafe { require_output(output, "cache stats output")? };
-        let stats = fs.fs.cache_stats();
+        let stats = match &fs.fs {
+            FfiFileSystemKind::ReadWrite(inner) => inner.cache_stats(),
+            FfiFileSystemKind::ReadOnly(inner) => inner.cache_stats(),
+        };
         *output = FfiCacheStats {
             block_cache_hits: stats.block_cache_hits,
             block_cache_misses: stats.block_cache_misses,
@@ -455,7 +516,10 @@ pub unsafe extern "C" fn slatedb_fs_get_io_stats(
     ffi_result(|| {
         let fs = unsafe { require_fs(fs)? };
         let output = unsafe { require_output(output, "I/O stats output")? };
-        let stats = fs.fs.io_stats();
+        let stats = match &fs.fs {
+            FfiFileSystemKind::ReadWrite(inner) => inner.io_stats(),
+            FfiFileSystemKind::ReadOnly(inner) => inner.io_stats(),
+        };
         *output = FfiIoStats {
             read_request_count: stats.read.request_count,
             read_average_latency_ms: duration_as_milliseconds(stats.read.average_latency),
@@ -490,7 +554,14 @@ pub unsafe extern "C" fn slatedb_fs_open_file(
         let fs = unsafe { require_fs(fs)? };
         let path = unsafe { require_path(path, "file path")? };
         let flags = unsafe { require_options(options)? };
-        let handle = fs.runtime.block_on(fs.fs.open_file(path, flags))?;
+        let handle: Box<dyn FileHandle + Send> = match &fs.fs {
+            FfiFileSystemKind::ReadWrite(inner) => {
+                Box::new(fs.runtime.block_on(inner.open_file(path, flags))?)
+            }
+            FfiFileSystemKind::ReadOnly(inner) => {
+                Box::new(fs.runtime.block_on(inner.open_file(path, flags))?)
+            }
+        };
         *output = Box::into_raw(Box::new(FfiFileHandle {
             runtime: Arc::clone(&fs.runtime),
             handle: Mutex::new(Some(handle)),
@@ -510,7 +581,11 @@ pub unsafe extern "C" fn slatedb_fs_file_exists(
         *output = 0;
         let fs = unsafe { require_fs(fs)? };
         let path = unsafe { require_path(path, "file path")? };
-        *output = i32::from(fs.runtime.block_on(fs.fs.file_exists(path))?);
+        let exists = match &fs.fs {
+            FfiFileSystemKind::ReadWrite(inner) => fs.runtime.block_on(inner.file_exists(path))?,
+            FfiFileSystemKind::ReadOnly(inner) => fs.runtime.block_on(inner.file_exists(path))?,
+        };
+        *output = i32::from(exists);
         Ok(())
     })
 }
@@ -523,7 +598,13 @@ pub unsafe extern "C" fn slatedb_fs_remove_file(
     ffi_result(|| {
         let fs = unsafe { require_fs(fs)? };
         let path = unsafe { require_path(path, "file path")? };
-        fs.runtime.block_on(fs.fs.remove_file(path))
+        match &fs.fs {
+            FfiFileSystemKind::ReadWrite(inner) => fs.runtime.block_on(inner.remove_file(path)),
+            FfiFileSystemKind::ReadOnly(_) => Err(Error::ReadOnlyViolation(ErrorStruct::new(
+                "read-only SlateDB filesystem cannot remove files".to_string(),
+                ErrorStatus::Permanent,
+            ))),
+        }
     })
 }
 
@@ -537,7 +618,15 @@ pub unsafe extern "C" fn slatedb_fs_move_file(
         let fs = unsafe { require_fs(fs)? };
         let source = unsafe { require_path(source, "source path")? };
         let target = unsafe { require_path(target, "target path")? };
-        fs.runtime.block_on(fs.fs.move_file(source, target))
+        match &fs.fs {
+            FfiFileSystemKind::ReadWrite(inner) => {
+                fs.runtime.block_on(inner.move_file(source, target))
+            }
+            FfiFileSystemKind::ReadOnly(_) => Err(Error::ReadOnlyViolation(ErrorStruct::new(
+                "read-only SlateDB filesystem cannot move files".to_string(),
+                ErrorStatus::Permanent,
+            ))),
+        }
     })
 }
 
@@ -716,7 +805,11 @@ pub unsafe extern "C" fn slatedb_fs_can_handle(
         Ok(path) => path,
         Err(_) => return 0,
     };
-    i32::from((*fs).fs.can_handle(path))
+    let can_handle = match &(*fs).fs {
+        FfiFileSystemKind::ReadWrite(inner) => inner.can_handle(path),
+        FfiFileSystemKind::ReadOnly(inner) => inner.can_handle(path),
+    };
+    i32::from(can_handle)
 }
 
 #[no_mangle]
@@ -728,6 +821,12 @@ pub extern "C" fn slatedb_fs_name() -> *const c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn database_config(read_only: bool) -> FfiDatabaseConfig {
+        FfiDatabaseConfig {
+            read_only: i32::from(read_only),
+        }
+    }
 
     fn read_write_options() -> FfiOpenOptions {
         FfiOpenOptions {
@@ -761,7 +860,8 @@ mod tests {
 
     unsafe fn create_fs() -> *mut FfiFileSystem {
         let mut fs = ptr::null_mut();
-        expect_ok(slatedb_fs_create_memory(ptr::null(), &mut fs));
+        let config = database_config(false);
+        expect_ok(slatedb_fs_create_memory(ptr::null(), &config, &mut fs));
         assert!(!fs.is_null());
         fs
     }
@@ -808,9 +908,10 @@ mod tests {
                 virtual_host_style: 0,
             };
             let mut fs = ptr::null_mut();
+            let database_config = database_config(false);
 
             assert_eq!(
-                slatedb_fs_create_s3(&config, ptr::null(), &mut fs),
+                slatedb_fs_create_s3(&config, ptr::null(), &database_config, &mut fs),
                 crate::error::ErrorCode::InvalidArgument as i32
             );
             assert!(fs.is_null());
@@ -824,17 +925,74 @@ mod tests {
         unsafe {
             let empty = CString::new("").unwrap();
             let mut fs = ptr::null_mut();
+            let database_config = database_config(false);
             assert_eq!(
-                slatedb_fs_create_local(empty.as_ptr(), ptr::null(), &mut fs),
+                slatedb_fs_create_local(empty.as_ptr(), ptr::null(), &database_config, &mut fs,),
                 crate::error::ErrorCode::InvalidArgument as i32
             );
             assert!(fs.is_null());
 
             let root = tempfile::tempdir().expect("temporary local root");
             let root = CString::new(root.path().to_str().expect("UTF-8 local root")).unwrap();
-            expect_ok(slatedb_fs_create_local(root.as_ptr(), ptr::null(), &mut fs));
+            expect_ok(slatedb_fs_create_local(
+                root.as_ptr(),
+                ptr::null(),
+                &database_config,
+                &mut fs,
+            ));
             assert!(!fs.is_null());
             slatedb_fs_destroy(fs);
+        }
+    }
+
+    #[test]
+    fn ffi_read_only_local_client_reopens_writer_data() {
+        unsafe {
+            let root = tempfile::tempdir().expect("temporary local root");
+            let root = CString::new(root.path().to_str().expect("UTF-8 local root")).unwrap();
+            let path = CString::new("database.db").unwrap();
+
+            let mut writer = ptr::null_mut();
+            let writer_config = database_config(false);
+            expect_ok(slatedb_fs_create_local(
+                root.as_ptr(),
+                ptr::null(),
+                &writer_config,
+                &mut writer,
+            ));
+            let handle = open_file(writer, &path, &read_write_options());
+            let mut bytes_written = 0;
+            expect_ok(slatedb_file_write(
+                handle,
+                b"contents".as_ptr(),
+                8,
+                &mut bytes_written,
+            ));
+            expect_ok(slatedb_file_sync(handle));
+            slatedb_file_destroy(handle);
+            slatedb_fs_destroy(writer);
+
+            let mut reader = ptr::null_mut();
+            let reader_config = database_config(true);
+            expect_ok(slatedb_fs_create_local(
+                root.as_ptr(),
+                ptr::null(),
+                &reader_config,
+                &mut reader,
+            ));
+            assert!(file_exists(reader, &path));
+            let handle = open_file(reader, &path, &read_only_options());
+            let mut contents = [0; 8];
+            let mut bytes_read = 0;
+            expect_ok(slatedb_file_read(
+                handle,
+                contents.as_mut_ptr(),
+                contents.len(),
+                &mut bytes_read,
+            ));
+            assert_eq!(&contents, b"contents");
+            slatedb_file_destroy(handle);
+            slatedb_fs_destroy(reader);
         }
     }
 

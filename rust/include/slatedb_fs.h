@@ -63,6 +63,11 @@ typedef struct slatedb_cache_config {
 	int32_t persistent_cache_on_compaction;
 } slatedb_cache_config;
 
+typedef struct slatedb_db_config {
+	// Open the SlateDB database without acquiring a writer epoch.
+	int32_t read_only;
+} slatedb_db_config;
+
 typedef struct slatedb_cache_stats {
 	// Successful in-memory data-block cache lookups.
 	uint64_t block_cache_hits;
@@ -130,10 +135,12 @@ typedef enum slatedb_fs_error_code {
 	SLATEDB_FS_ERROR_IO = 7,
 } slatedb_fs_error_code;
 
-int32_t slatedb_fs_create_memory(const slatedb_cache_config *cache_config, slatedb_fs **output);
-int32_t slatedb_fs_create_local(const char *root, const slatedb_cache_config *cache_config, slatedb_fs **output);
+int32_t slatedb_fs_create_memory(const slatedb_cache_config *cache_config, const slatedb_db_config *db_config,
+                                 slatedb_fs **output);
+int32_t slatedb_fs_create_local(const char *root, const slatedb_cache_config *cache_config,
+                                const slatedb_db_config *db_config, slatedb_fs **output);
 int32_t slatedb_fs_create_s3(const slatedb_s3_config *config, const slatedb_cache_config *cache_config,
-                             slatedb_fs **output);
+                             const slatedb_db_config *db_config, slatedb_fs **output);
 void slatedb_fs_destroy(slatedb_fs *fs);
 int32_t slatedb_fs_get_cache_stats(const slatedb_fs *fs, slatedb_cache_stats *output);
 int32_t slatedb_fs_get_io_stats(const slatedb_fs *fs, slatedb_io_stats *output);
@@ -148,8 +155,7 @@ int32_t slatedb_fs_move_file(const slatedb_fs *fs, const char *source, const cha
 int32_t slatedb_file_read(const slatedb_file_handle *handle, uint8_t *buffer, size_t len, size_t *bytes_read);
 int32_t slatedb_file_pread(const slatedb_file_handle *handle, uint8_t *buffer, size_t len, uint64_t offset,
                            size_t *bytes_read);
-int32_t slatedb_file_write(const slatedb_file_handle *handle, const uint8_t *buffer, size_t len,
-                           size_t *bytes_written);
+int32_t slatedb_file_write(const slatedb_file_handle *handle, const uint8_t *buffer, size_t len, size_t *bytes_written);
 int32_t slatedb_file_pwrite(const slatedb_file_handle *handle, const uint8_t *buffer, size_t len, uint64_t offset);
 int32_t slatedb_file_sync(const slatedb_file_handle *handle);
 int32_t slatedb_file_truncate(const slatedb_file_handle *handle, uint64_t new_size);

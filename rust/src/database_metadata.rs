@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use slatedb::{Db, IsolationLevel};
+use slatedb::{Db, DbReader, IsolationLevel};
 
 use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
@@ -169,6 +169,49 @@ impl DatabaseMetadata {
         transaction.put(NEXT_FILE_ID_KEY, next_file_id.to_be_bytes())?;
         transaction.commit().await?;
 
+        Ok((file_id, metadata))
+    }
+}
+
+/// Read-only access to logical file catalog entries.
+pub(crate) struct ReadOnlyDatabaseMetadata {
+    reader: Arc<DbReader>,
+}
+
+impl ReadOnlyDatabaseMetadata {
+    pub(crate) fn new(reader: Arc<DbReader>) -> Self {
+        Self { reader }
+    }
+
+    pub(crate) async fn file_exists(&self, path: &str) -> Result<bool> {
+        validate_path(path)?;
+        Ok(self.reader.get(path_key(path)).await?.is_some())
+    }
+
+    pub(crate) async fn open_file(&self, path: &str) -> Result<(u64, FileMetadata)> {
+        validate_path(path)?;
+        let file_id = self
+            .reader
+            .get(path_key(path))
+            .await?
+            .ok_or_else(|| {
+                Error::FileNotFound(ErrorStruct::new(
+                    format!("file not found: {path}"),
+                    ErrorStatus::Permanent,
+                ))
+            })
+            .and_then(|bytes| decode_file_id(&bytes, "path mapping"))?;
+        let metadata = self
+            .reader
+            .get(metadata_key(file_id))
+            .await?
+            .ok_or_else(|| {
+                Error::MetadataDecode(ErrorStruct::new(
+                    format!("metadata is missing for file_id {file_id}"),
+                    ErrorStatus::Permanent,
+                ))
+            })
+            .and_then(|bytes| FileMetadata::decode_from_bytes(&bytes))?;
         Ok((file_id, metadata))
     }
 }
