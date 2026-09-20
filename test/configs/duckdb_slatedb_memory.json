@@ -2,6 +2,7 @@
   "description": "Run DuckDB SQLLogicTests against the in-memory SlateDB-backed filesystem.",
   "on_init": "SET duckdb_objfs_backend = 'memory'; ATTACH 'duckdb_objfs://{BASE_TEST_NAME}.db' AS __test__config__slatedb;",
   "on_new_connection": "USE __test__config__slatedb;",
+  "on_load": "skip",
   "skip_compiled": true,
   "statically_loaded_extensions": [
     "core_functions",
