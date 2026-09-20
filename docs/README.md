@@ -206,3 +206,18 @@ While a read-write attachment exists in the same process, read-only opens are
 served by the read-write SlateDB instance and always see the latest committed
 state.
 
+## Single writer
+
+Only one process may hold a read-write attachment of a `duckdb_objfs://`
+database at a time. The extension does not implement file locking, so a second
+read-write `ATTACH` does not fail up front. Instead, SlateDB's manifest
+fencing is the backstop: the second writer bumps the manifest's writer epoch
+and takes over, and the first process starts failing with I/O errors on its
+next flush or checkpoint.
+
+Fencing keeps the stored data consistent, but the delayed failure is confusing
+enough that concurrent writers must be treated as a configuration error, not a
+supported mode. Use external coordination or a single-writer deployment to
+guarantee exclusivity. Read-only attachments are unaffected: any number of
+processes may attach read-only alongside the writer and each other.
+
