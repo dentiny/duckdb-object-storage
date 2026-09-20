@@ -390,11 +390,60 @@ fn build_s3_operator(config: S3StorageConfig) -> Result<Operator> {
 
 #[cfg(test)]
 mod tests {
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
+    use s3s::auth::SimpleAuth;
+    use s3s::host::SingleDomain;
+    use s3s::service::S3ServiceBuilder;
+    use s3s_fs::FileSystem as S3FileSystem;
     use slatedb::WriteBatch;
     use tempfile::tempdir;
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
 
     use super::*;
     use crate::keys;
+
+    const S3_ACCESS_KEY: &str = "test-access-key";
+    const S3_BUCKET: &str = "test-bucket";
+    const S3_SECRET_KEY: &str = "test-secret-key";
+
+    async fn start_fake_s3(root: &std::path::Path) -> (String, JoinHandle<()>) {
+        std::fs::create_dir(root.join(S3_BUCKET)).unwrap();
+        let storage = S3FileSystem::new(root).unwrap();
+        let mut builder = S3ServiceBuilder::new(storage);
+        builder.set_auth(SimpleAuth::from_single(S3_ACCESS_KEY, S3_SECRET_KEY));
+        builder.set_host(SingleDomain::new("localhost").unwrap());
+        let service = builder.build();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let connection = ConnectionBuilder::new(TokioExecutor::new())
+                    .serve_connection(TokioIo::new(socket), service.clone())
+                    .into_owned();
+                tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+            }
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn fake_s3_config(endpoint: &str) -> S3StorageConfig {
+        S3StorageConfig {
+            bucket: S3_BUCKET.to_string(),
+            root: Some("slatedb-test".to_string()),
+            endpoint: Some(endpoint.to_string()),
+            region: Some("us-east-1".to_string()),
+            key_id: Some(S3_ACCESS_KEY.to_string()),
+            secret: Some(S3_SECRET_KEY.to_string()),
+            session_token: None,
+            use_ssl: false,
+            virtual_host_style: false,
+        }
+    }
 
     #[tokio::test]
     async fn creates_and_reopens_file_by_path() {
@@ -471,6 +520,56 @@ mod tests {
         reopened.close().await.expect("close file");
         drop(reopened);
         second.close().await.expect("second close");
+    }
+
+    #[tokio::test]
+    async fn s3_database_persists_across_reopen() {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            check_s3_database_persists_across_reopen(),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn check_s3_database_persists_across_reopen() {
+        let root = tempdir().unwrap();
+        let (endpoint, server) = start_fake_s3(root.path()).await;
+
+        let mut first = SlateDbFileSystem::open_s3("s3-persistent-db", fake_s3_config(&endpoint))
+            .await
+            .unwrap();
+        let mut created = first
+            .open_file("database.db", FileOpenFlags::open_or_create())
+            .await
+            .unwrap();
+        created.write(b"persisted through S3").await.unwrap();
+        created.close().await.unwrap();
+        drop(created);
+        first.close().await.unwrap();
+
+        let mut second = SlateDbFileSystem::open_s3("s3-persistent-db", fake_s3_config(&endpoint))
+            .await
+            .unwrap();
+        assert!(second.file_exists("database.db").await.unwrap());
+        let mut reopened = second
+            .open_file("database.db", FileOpenFlags::read_only())
+            .await
+            .unwrap();
+        let mut contents = vec![0; "persisted through S3".len()];
+        assert_eq!(reopened.read(&mut contents).await.unwrap(), contents.len());
+        assert_eq!(contents, b"persisted through S3");
+        reopened.close().await.unwrap();
+        drop(reopened);
+
+        second.move_file("database.db", "renamed.db").await.unwrap();
+        assert!(!second.file_exists("database.db").await.unwrap());
+        assert!(second.file_exists("renamed.db").await.unwrap());
+        second.remove_file("renamed.db").await.unwrap();
+        assert!(!second.file_exists("renamed.db").await.unwrap());
+        second.close().await.unwrap();
+
+        server.abort();
     }
 
     #[tokio::test]
