@@ -49,7 +49,20 @@ SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_read_only_backend'
 statement ok reader
 ATTACH 'duckdb_objfs://reader.db' AS reader_db (READ_ONLY)
 
+statement ok reader
+BEGIN TRANSACTION
+
 query I reader
+SELECT sum(i) FROM reader_db.items
+----
+10
+
+# A second DuckDB connection can read from the same read-only attachment while
+# the first reader connection remains active.
+statement ok reader_two
+BEGIN TRANSACTION
+
+query I reader_two
 SELECT sum(i) FROM reader_db.items
 ----
 10
@@ -77,6 +90,17 @@ query I reader
 SELECT sum(i) FROM reader_db.items
 ----
 10
+
+query I reader_two
+SELECT sum(i) FROM reader_db.items
+----
+10
+
+statement ok reader
+COMMIT
+
+statement ok reader_two
+COMMIT
 
 statement ok writer
 INSERT INTO writer_db.items VALUES (3)

@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::fs::{SlateDbFileSystem, SlateDbReadOnlyFileSystem};
+use crate::fs::SlateDbFileSystem;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IoOperationStats {
@@ -92,12 +92,6 @@ impl IoMetrics {
 }
 
 impl SlateDbFileSystem {
-    pub fn io_stats(&self) -> IoStats {
-        self.io_metrics.snapshot()
-    }
-}
-
-impl SlateDbReadOnlyFileSystem {
     pub fn io_stats(&self) -> IoStats {
         self.io_metrics.snapshot()
     }

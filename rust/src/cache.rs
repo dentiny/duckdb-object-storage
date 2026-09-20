@@ -5,7 +5,7 @@ use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use slatedb::db_cache::{DbCache, SplitCache};
 use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue, Metrics};
 
-use crate::fs::{SlateDbFileSystem, SlateDbReadOnlyFileSystem};
+use crate::fs::SlateDbFileSystem;
 
 #[derive(Clone)]
 pub struct CacheConfig {
@@ -112,12 +112,6 @@ impl CacheMetrics {
 }
 
 impl SlateDbFileSystem {
-    pub fn cache_stats(&self) -> CacheStats {
-        cache_stats(&self.cache_metrics)
-    }
-}
-
-impl SlateDbReadOnlyFileSystem {
     pub fn cache_stats(&self) -> CacheStats {
         cache_stats(&self.cache_metrics)
     }

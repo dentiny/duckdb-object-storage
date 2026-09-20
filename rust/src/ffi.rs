@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::FileHandle;
 use crate::flags::FileOpenFlags;
-use crate::fs::{S3StorageConfig, SlateDbFileSystem, SlateDbReadOnlyFileSystem};
+use crate::fs::{S3StorageConfig, SlateDbAccessMode, SlateDbFileSystem};
 
 const DATABASE_PATH: &str = "duckdb-object-storage";
 
@@ -143,12 +143,7 @@ pub struct FfiIoStats {
 /// filesystem instance.
 pub struct FfiFileSystem {
     runtime: Arc<Runtime>,
-    fs: FfiFileSystemKind,
-}
-
-enum FfiFileSystemKind {
-    ReadWrite(SlateDbFileSystem),
-    ReadOnly(SlateDbReadOnlyFileSystem),
+    fs: SlateDbFileSystem,
 }
 
 pub struct FfiFileHandle {
@@ -292,12 +287,12 @@ unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlag
     })
 }
 
-unsafe fn require_database_config(config: *const FfiDatabaseConfig) -> Result<bool> {
+unsafe fn require_database_config(config: *const FfiDatabaseConfig) -> Result<SlateDbAccessMode> {
     let config = unsafe { config.as_ref() }
         .ok_or_else(|| invalid_argument("database config must not be null"))?;
     match config.read_only {
-        0 => Ok(false),
-        1 => Ok(true),
+        0 => Ok(SlateDbAccessMode::ReadWrite),
+        1 => Ok(SlateDbAccessMode::ReadOnly),
         _ => Err(invalid_argument("database config read_only must be 0 or 1")),
     }
 }
@@ -375,21 +370,14 @@ pub unsafe extern "C" fn slatedb_fs_create_memory(
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
-        let read_only = unsafe { require_database_config(database_config)? };
+        let access_mode = unsafe { require_database_config(database_config)? };
         let cache_config = unsafe { parse_cache_config(cache_config)? };
         let runtime = create_runtime()?;
-        let fs = if read_only {
-            FfiFileSystemKind::ReadOnly(runtime.block_on(
-                SlateDbReadOnlyFileSystem::open_in_memory_with_cache_config(
-                    DATABASE_PATH,
-                    cache_config,
-                ),
-            )?)
-        } else {
-            FfiFileSystemKind::ReadWrite(runtime.block_on(
-                SlateDbFileSystem::open_in_memory_with_cache_config(DATABASE_PATH, cache_config),
-            )?)
-        };
+        let fs = runtime.block_on(SlateDbFileSystem::open_in_memory_with_cache_config(
+            DATABASE_PATH,
+            cache_config,
+            access_mode,
+        ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
     })
@@ -405,26 +393,19 @@ pub unsafe extern "C" fn slatedb_fs_create_local(
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
-        let read_only = unsafe { require_database_config(database_config)? };
+        let access_mode = unsafe { require_database_config(database_config)? };
         let root = unsafe { require_path(root, "local root")? };
         if root.is_empty() {
             return Err(invalid_argument("local root must not be empty"));
         }
         let cache_config = unsafe { parse_cache_config(cache_config)? };
         let runtime = create_runtime()?;
-        let fs = if read_only {
-            FfiFileSystemKind::ReadOnly(runtime.block_on(
-                SlateDbReadOnlyFileSystem::open_local_with_cache_config(
-                    DATABASE_PATH,
-                    root,
-                    cache_config,
-                ),
-            )?)
-        } else {
-            FfiFileSystemKind::ReadWrite(runtime.block_on(
-                SlateDbFileSystem::open_local_with_cache_config(DATABASE_PATH, root, cache_config),
-            )?)
-        };
+        let fs = runtime.block_on(SlateDbFileSystem::open_local_with_cache_config(
+            DATABASE_PATH,
+            root,
+            cache_config,
+            access_mode,
+        ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
     })
@@ -440,23 +421,16 @@ pub unsafe extern "C" fn slatedb_fs_create_s3(
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
-        let read_only = unsafe { require_database_config(database_config)? };
+        let access_mode = unsafe { require_database_config(database_config)? };
         let config = unsafe { require_s3_config(config)? };
         let cache_config = unsafe { parse_cache_config(cache_config)? };
         let runtime = create_runtime()?;
-        let fs = if read_only {
-            FfiFileSystemKind::ReadOnly(runtime.block_on(
-                SlateDbReadOnlyFileSystem::open_s3_with_cache_config(
-                    DATABASE_PATH,
-                    config,
-                    cache_config,
-                ),
-            )?)
-        } else {
-            FfiFileSystemKind::ReadWrite(runtime.block_on(
-                SlateDbFileSystem::open_s3_with_cache_config(DATABASE_PATH, config, cache_config),
-            )?)
-        };
+        let fs = runtime.block_on(SlateDbFileSystem::open_s3_with_cache_config(
+            DATABASE_PATH,
+            config,
+            cache_config,
+            access_mode,
+        ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
     })
@@ -469,14 +443,7 @@ pub unsafe extern "C" fn slatedb_fs_destroy(fs: *mut FfiFileSystem) {
     }
     let _ = catch_unwind(AssertUnwindSafe(|| {
         let mut fs = unsafe { Box::from_raw(fs) };
-        match &mut fs.fs {
-            FfiFileSystemKind::ReadWrite(inner) => {
-                let _ = fs.runtime.block_on(inner.close());
-            }
-            FfiFileSystemKind::ReadOnly(inner) => {
-                let _ = fs.runtime.block_on(inner.close());
-            }
-        }
+        let _ = fs.runtime.block_on(fs.fs.close());
     }));
 }
 
@@ -488,10 +455,7 @@ pub unsafe extern "C" fn slatedb_fs_get_cache_stats(
     ffi_result(|| {
         let fs = unsafe { require_fs(fs)? };
         let output = unsafe { require_output(output, "cache stats output")? };
-        let stats = match &fs.fs {
-            FfiFileSystemKind::ReadWrite(inner) => inner.cache_stats(),
-            FfiFileSystemKind::ReadOnly(inner) => inner.cache_stats(),
-        };
+        let stats = fs.fs.cache_stats();
         *output = FfiCacheStats {
             block_cache_hits: stats.block_cache_hits,
             block_cache_misses: stats.block_cache_misses,
@@ -516,10 +480,7 @@ pub unsafe extern "C" fn slatedb_fs_get_io_stats(
     ffi_result(|| {
         let fs = unsafe { require_fs(fs)? };
         let output = unsafe { require_output(output, "I/O stats output")? };
-        let stats = match &fs.fs {
-            FfiFileSystemKind::ReadWrite(inner) => inner.io_stats(),
-            FfiFileSystemKind::ReadOnly(inner) => inner.io_stats(),
-        };
+        let stats = fs.fs.io_stats();
         *output = FfiIoStats {
             read_request_count: stats.read.request_count,
             read_average_latency_ms: duration_as_milliseconds(stats.read.average_latency),
@@ -554,14 +515,7 @@ pub unsafe extern "C" fn slatedb_fs_open_file(
         let fs = unsafe { require_fs(fs)? };
         let path = unsafe { require_path(path, "file path")? };
         let flags = unsafe { require_options(options)? };
-        let handle: Box<dyn FileHandle + Send> = match &fs.fs {
-            FfiFileSystemKind::ReadWrite(inner) => {
-                Box::new(fs.runtime.block_on(inner.open_file(path, flags))?)
-            }
-            FfiFileSystemKind::ReadOnly(inner) => {
-                Box::new(fs.runtime.block_on(inner.open_file(path, flags))?)
-            }
-        };
+        let handle = fs.runtime.block_on(fs.fs.open_file(path, flags))?;
         *output = Box::into_raw(Box::new(FfiFileHandle {
             runtime: Arc::clone(&fs.runtime),
             handle: Mutex::new(Some(handle)),
@@ -581,10 +535,7 @@ pub unsafe extern "C" fn slatedb_fs_file_exists(
         *output = 0;
         let fs = unsafe { require_fs(fs)? };
         let path = unsafe { require_path(path, "file path")? };
-        let exists = match &fs.fs {
-            FfiFileSystemKind::ReadWrite(inner) => fs.runtime.block_on(inner.file_exists(path))?,
-            FfiFileSystemKind::ReadOnly(inner) => fs.runtime.block_on(inner.file_exists(path))?,
-        };
+        let exists = fs.runtime.block_on(fs.fs.file_exists(path))?;
         *output = i32::from(exists);
         Ok(())
     })
@@ -598,13 +549,7 @@ pub unsafe extern "C" fn slatedb_fs_remove_file(
     ffi_result(|| {
         let fs = unsafe { require_fs(fs)? };
         let path = unsafe { require_path(path, "file path")? };
-        match &fs.fs {
-            FfiFileSystemKind::ReadWrite(inner) => fs.runtime.block_on(inner.remove_file(path)),
-            FfiFileSystemKind::ReadOnly(_) => Err(Error::ReadOnlyViolation(ErrorStruct::new(
-                "read-only SlateDB filesystem cannot remove files".to_string(),
-                ErrorStatus::Permanent,
-            ))),
-        }
+        fs.runtime.block_on(fs.fs.remove_file(path))
     })
 }
 
@@ -618,15 +563,7 @@ pub unsafe extern "C" fn slatedb_fs_move_file(
         let fs = unsafe { require_fs(fs)? };
         let source = unsafe { require_path(source, "source path")? };
         let target = unsafe { require_path(target, "target path")? };
-        match &fs.fs {
-            FfiFileSystemKind::ReadWrite(inner) => {
-                fs.runtime.block_on(inner.move_file(source, target))
-            }
-            FfiFileSystemKind::ReadOnly(_) => Err(Error::ReadOnlyViolation(ErrorStruct::new(
-                "read-only SlateDB filesystem cannot move files".to_string(),
-                ErrorStatus::Permanent,
-            ))),
-        }
+        fs.runtime.block_on(fs.fs.move_file(source, target))
     })
 }
 
@@ -805,11 +742,7 @@ pub unsafe extern "C" fn slatedb_fs_can_handle(
         Ok(path) => path,
         Err(_) => return 0,
     };
-    let can_handle = match &(*fs).fs {
-        FfiFileSystemKind::ReadWrite(inner) => inner.can_handle(path),
-        FfiFileSystemKind::ReadOnly(inner) => inner.can_handle(path),
-    };
-    i32::from(can_handle)
+    i32::from((*fs).fs.can_handle(path))
 }
 
 #[no_mangle]
