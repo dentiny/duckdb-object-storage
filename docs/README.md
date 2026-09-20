@@ -138,6 +138,52 @@ with:
 SELECT * FROM duckdb_objfs_cache_stats();
 ```
 
+The following example writes enough data to create SSTs, reopens the database
+to read them through the cache, and formats the hit rate as a percentage:
+
+```sql
+SET duckdb_objfs_backend = 'local';
+SET duckdb_objfs_root = '/tmp/duckdb-objfs-cache-demo';
+SET duckdb_objfs_memory_cache_size = 67108864;   -- 64 MiB
+SET duckdb_objfs_metadata_cache_size = 16777216; -- 16 MiB
+
+ATTACH 'duckdb_objfs://cache-demo.db' AS obj;
+CREATE OR REPLACE TABLE obj.items AS
+SELECT range AS i, random() AS payload
+FROM range(12000000);
+CHECKPOINT obj;
+
+DETACH obj;
+ATTACH 'duckdb_objfs://cache-demo.db' AS obj;
+SELECT count(*), sum(i), avg(payload) FROM obj.items;
+
+SELECT cache,
+       hit_count,
+       miss_count,
+       CASE WHEN hit_rate IS NULL
+            THEN NULL
+            ELSE printf('%.3f%%', hit_rate * 100)
+       END AS hit_rate,
+       entry_count,
+       size_bytes,
+       eviction_count,
+       evicted_bytes
+FROM duckdb_objfs_cache_stats();
+```
+
+Example output (exact counts and rates vary by run):
+
+```text
+cache            hit_count  miss_count  hit_rate  entry_count  size_bytes  eviction_count  evicted_bytes
+memory_data      754        218         77.572%   NULL         NULL        NULL            NULL
+memory_metadata  332        0           100.000%  NULL         NULL        NULL            NULL
+persistent       0          0           NULL      0            0           0               0
+```
+
+For a completely fresh run, exit DuckDB and remove
+`/tmp/duckdb-objfs-cache-demo` first. Smaller workloads can remain in
+SlateDB's WAL or memtable and therefore report zero SST cache accesses.
+
 The function returns rows for `memory_data`, `memory_metadata`, and
 `persistent` caches. It reports hit and miss counts and hit rate. The
 persistent row also reports its current entry count, size, and eviction
