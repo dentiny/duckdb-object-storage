@@ -193,3 +193,16 @@ ATTACH 'duckdb_objfs://database.db' AS object_db (READ_ONLY);
 SELECT * FROM object_db.items;
 ```
 
+## Read consistency
+
+Read-only attachments share a cached SlateDB reader that follows the writer's
+manifest roughly every 10 seconds
+([`DbReaderOptions::manifest_poll_interval`](https://slatedb.io/docs/design/readers/)).
+Data committed by another process can therefore stay invisible for up to that
+interval — including across `DETACH`/`ATTACH`, which reuses the cached reader
+instead of rebuilding it.
+
+While a read-write attachment exists in the same process, read-only opens are
+served by the read-write SlateDB instance and always see the latest committed
+state.
+
