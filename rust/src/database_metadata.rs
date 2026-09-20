@@ -2,10 +2,9 @@
 
 use std::sync::Arc;
 
-use slatedb::{Db, DbReader, IsolationLevel};
+use slatedb::{Db, DbReadOps, IsolationLevel};
 
 use crate::error::{Error, Result};
-use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_metadata::FileMetadata;
 use crate::keys::{chunk_prefix, metadata_key};
 
@@ -13,39 +12,48 @@ const NEXT_FILE_ID_KEY: &[u8] = b"m/0000000000000000/next_file_id";
 const PATH_PREFIX: &[u8] = b"p/";
 
 /// Reads and updates metadata shared by every logical file in a database.
-pub(crate) struct DatabaseMetadata {
-    db: Arc<Db>,
+pub(crate) struct DatabaseMetadata<T> {
+    client: Arc<T>,
 }
 
-impl DatabaseMetadata {
-    pub(crate) fn new(db: Arc<Db>) -> Self {
-        Self { db }
+impl<T> DatabaseMetadata<T> {
+    pub(crate) fn new(client: Arc<T>) -> Self {
+        Self { client }
     }
+}
 
+impl<T: DbReadOps + Sync> DatabaseMetadata<T> {
     /// Returns whether a path has a catalog entry.
     ///
     /// Existence is intentionally determined by the path mapping alone. It
     /// does not read file metadata or scan chunks.
     pub(crate) async fn file_exists(&self, path: &str) -> Result<bool> {
         validate_path(path)?;
-        Ok(self.db.get(path_key(path)).await?.is_some())
+        Ok(self.client.get(path_key(path)).await?.is_some())
     }
 
+    pub(crate) async fn open_file(&self, path: &str) -> Result<(u64, FileMetadata)> {
+        validate_path(path)?;
+        find_file(self.client.as_ref(), path)
+            .await?
+            .ok_or_else(|| Error::file_not_found(path))
+    }
+}
+
+impl DatabaseMetadata<Db> {
     /// Atomically removes a path mapping, its metadata, and all content chunks.
     pub(crate) async fn remove_file(&self, path: &str) -> Result<()> {
         validate_path(path)?;
 
         let path_key = path_key(path);
-        let transaction = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let transaction = self
+            .client
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await?;
         let file_id = transaction
             .get(&path_key)
             .await?
-            .ok_or_else(|| {
-                Error::FileNotFound(ErrorStruct::new(
-                    format!("file not found: {path}"),
-                    ErrorStatus::Permanent,
-                ))
-            })
+            .ok_or_else(|| Error::file_not_found(path))
             .and_then(|bytes| decode_file_id(&bytes, "path mapping"))?;
 
         transaction.delete(&path_key)?;
@@ -71,17 +79,15 @@ impl DatabaseMetadata {
 
         let source_key = path_key(source);
         let target_key = path_key(target);
-        let transaction = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let transaction = self
+            .client
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await?;
 
         let source_file_id = transaction
             .get(&source_key)
             .await?
-            .ok_or_else(|| {
-                Error::FileNotFound(ErrorStruct::new(
-                    format!("file not found: {source}"),
-                    ErrorStatus::Permanent,
-                ))
-            })
+            .ok_or_else(|| Error::file_not_found(source))
             .and_then(|bytes| decode_file_id(&bytes, "source path mapping"))?;
 
         if let Some(target_file_id_bytes) = transaction.get(&target_key).await? {
@@ -115,21 +121,12 @@ impl DatabaseMetadata {
         validate_path(path)?;
 
         let path_key = path_key(path);
-        let transaction = self.db.begin(IsolationLevel::SerializableSnapshot).await?;
+        let transaction = self
+            .client
+            .begin(IsolationLevel::SerializableSnapshot)
+            .await?;
 
-        if let Some(file_id_bytes) = transaction.get(&path_key).await? {
-            let file_id = decode_file_id(&file_id_bytes, "path mapping")?;
-            let metadata = transaction
-                .get(metadata_key(file_id))
-                .await?
-                .ok_or_else(|| {
-                    Error::MetadataDecode(ErrorStruct::new(
-                        format!("metadata is missing for file_id {file_id}"),
-                        ErrorStatus::Permanent,
-                    ))
-                })
-                .and_then(|bytes| FileMetadata::decode_from_bytes(&bytes))?;
-
+        if let Some((file_id, metadata)) = find_file(&transaction, path).await? {
             if truncate_existing {
                 let mut chunks = transaction.scan_prefix(chunk_prefix(file_id), ..).await?;
                 while let Some(chunk) = chunks.next().await? {
@@ -146,22 +143,16 @@ impl DatabaseMetadata {
         }
 
         if !create {
-            return Err(Error::FileNotFound(ErrorStruct::new(
-                format!("file not found: {path}"),
-                ErrorStatus::Permanent,
-            )));
+            return Err(Error::file_not_found(path));
         }
 
         let file_id = match transaction.get(NEXT_FILE_ID_KEY).await? {
             Some(bytes) => decode_file_id(&bytes, "next file ID")?,
             None => 1,
         };
-        let next_file_id = file_id.checked_add(1).ok_or_else(|| {
-            Error::MetadataDecode(ErrorStruct::new(
-                "file ID space is exhausted".to_string(),
-                ErrorStatus::Permanent,
-            ))
-        })?;
+        let next_file_id = file_id
+            .checked_add(1)
+            .ok_or_else(|| Error::metadata_decode("file ID space is exhausted"))?;
         let metadata = FileMetadata::new();
 
         transaction.put(&path_key, file_id.to_be_bytes())?;
@@ -173,55 +164,25 @@ impl DatabaseMetadata {
     }
 }
 
-/// Read-only access to logical file catalog entries.
-pub(crate) struct ReadOnlyDatabaseMetadata {
-    reader: Arc<DbReader>,
-}
-
-impl ReadOnlyDatabaseMetadata {
-    pub(crate) fn new(reader: Arc<DbReader>) -> Self {
-        Self { reader }
-    }
-
-    pub(crate) async fn file_exists(&self, path: &str) -> Result<bool> {
-        validate_path(path)?;
-        Ok(self.reader.get(path_key(path)).await?.is_some())
-    }
-
-    pub(crate) async fn open_file(&self, path: &str) -> Result<(u64, FileMetadata)> {
-        validate_path(path)?;
-        let file_id = self
-            .reader
-            .get(path_key(path))
-            .await?
-            .ok_or_else(|| {
-                Error::FileNotFound(ErrorStruct::new(
-                    format!("file not found: {path}"),
-                    ErrorStatus::Permanent,
-                ))
-            })
-            .and_then(|bytes| decode_file_id(&bytes, "path mapping"))?;
-        let metadata = self
-            .reader
-            .get(metadata_key(file_id))
-            .await?
-            .ok_or_else(|| {
-                Error::MetadataDecode(ErrorStruct::new(
-                    format!("metadata is missing for file_id {file_id}"),
-                    ErrorStatus::Permanent,
-                ))
-            })
-            .and_then(|bytes| FileMetadata::decode_from_bytes(&bytes))?;
-        Ok((file_id, metadata))
-    }
+async fn find_file(
+    reader: &(impl DbReadOps + Sync + ?Sized),
+    path: &str,
+) -> Result<Option<(u64, FileMetadata)>> {
+    let Some(file_id_bytes) = reader.get(path_key(path)).await? else {
+        return Ok(None);
+    };
+    let file_id = decode_file_id(&file_id_bytes, "path mapping")?;
+    let metadata = reader
+        .get(metadata_key(file_id))
+        .await?
+        .ok_or_else(|| Error::metadata_decode(format!("metadata is missing for file_id {file_id}")))
+        .and_then(|bytes| FileMetadata::decode_from_bytes(&bytes))?;
+    Ok(Some((file_id, metadata)))
 }
 
 fn validate_path(path: &str) -> Result<()> {
     if path.is_empty() {
-        return Err(Error::InvalidArgument(ErrorStruct::new(
-            "file path must not be empty".to_string(),
-            ErrorStatus::Permanent,
-        )));
+        return Err(Error::invalid_argument("file path must not be empty"));
     }
     Ok(())
 }
@@ -234,17 +195,13 @@ fn path_key(path: &str) -> Vec<u8> {
 }
 
 fn decode_file_id(bytes: &[u8], record: &str) -> Result<u64> {
-    let encoded: [u8; 8] = bytes.try_into().map_err(|_| {
-        Error::MetadataDecode(ErrorStruct::new(
-            format!("{record} must contain an 8-byte file ID"),
-            ErrorStatus::Permanent,
-        ))
-    })?;
+    let encoded: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| Error::metadata_decode(format!("{record} must contain an 8-byte file ID")))?;
     let file_id = u64::from_be_bytes(encoded);
     if file_id == 0 {
-        return Err(Error::MetadataDecode(ErrorStruct::new(
-            format!("{record} contains reserved file ID 0"),
-            ErrorStatus::Permanent,
+        return Err(Error::metadata_decode(format!(
+            "{record} contains reserved file ID 0"
         )));
     }
     Ok(file_id)

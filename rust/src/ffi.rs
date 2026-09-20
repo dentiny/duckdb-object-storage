@@ -10,7 +10,6 @@ use tokio::runtime::Runtime;
 
 use crate::cache::CacheConfig;
 use crate::error::{Error, Result};
-use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::FileHandle;
 use crate::flags::FileOpenFlags;
 use crate::fs::{S3StorageConfig, SlateDbAccessMode, SlateDbFileSystem};
@@ -156,10 +155,6 @@ thread_local! {
         RefCell::new(CString::new("").expect("empty string has no NUL"));
 }
 
-fn invalid_argument(message: impl Into<String>) -> Error {
-    Error::InvalidArgument(ErrorStruct::new(message.into(), ErrorStatus::Permanent))
-}
-
 fn panic_message(payload: Box<dyn Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_string()
@@ -182,7 +177,7 @@ fn ffi_result(operation: impl FnOnce() -> Result<()>) -> i32 {
     match catch_unwind(AssertUnwindSafe(operation)) {
         Ok(Ok(())) => 0,
         Ok(Err(error)) => store_error(error),
-        Err(payload) => store_error(invalid_argument(format!(
+        Err(payload) => store_error(Error::invalid_argument(format!(
             "Rust panic while handling FFI call: {}",
             panic_message(payload)
         ))),
@@ -190,16 +185,17 @@ fn ffi_result(operation: impl FnOnce() -> Result<()>) -> i32 {
 }
 
 unsafe fn require_fs<'a>(fs: *const FfiFileSystem) -> Result<&'a FfiFileSystem> {
-    unsafe { fs.as_ref() }.ok_or_else(|| invalid_argument("filesystem pointer must not be null"))
+    unsafe { fs.as_ref() }
+        .ok_or_else(|| Error::invalid_argument("filesystem pointer must not be null"))
 }
 
 unsafe fn require_path<'a>(path: *const c_char, name: &str) -> Result<&'a str> {
     if path.is_null() {
-        return Err(invalid_argument(format!("{name} must not be null")));
+        return Err(Error::invalid_argument(format!("{name} must not be null")));
     }
     unsafe { CStr::from_ptr(path) }
         .to_str()
-        .map_err(|_| invalid_argument(format!("{name} must be valid UTF-8")))
+        .map_err(|_| Error::invalid_argument(format!("{name} must be valid UTF-8")))
 }
 
 unsafe fn optional_string(value: *const c_char, name: &str) -> Result<Option<String>> {
@@ -208,7 +204,7 @@ unsafe fn optional_string(value: *const c_char, name: &str) -> Result<Option<Str
     }
     let value = unsafe { CStr::from_ptr(value) }
         .to_str()
-        .map_err(|_| invalid_argument(format!("{name} must be valid UTF-8")))?;
+        .map_err(|_| Error::invalid_argument(format!("{name} must be valid UTF-8")))?;
     if value.is_empty() {
         Ok(None)
     } else {
@@ -217,8 +213,8 @@ unsafe fn optional_string(value: *const c_char, name: &str) -> Result<Option<Str
 }
 
 unsafe fn require_s3_config(config: *const FfiS3Config) -> Result<S3StorageConfig> {
-    let config =
-        unsafe { config.as_ref() }.ok_or_else(|| invalid_argument("S3 config must not be null"))?;
+    let config = unsafe { config.as_ref() }
+        .ok_or_else(|| Error::invalid_argument("S3 config must not be null"))?;
     let bucket = unsafe { require_path(config.bucket, "S3 bucket")? }.to_string();
     Ok(S3StorageConfig {
         bucket,
@@ -241,27 +237,28 @@ unsafe fn parse_cache_config(config: *const FfiCacheConfig) -> Result<CacheConfi
         unsafe { optional_string(config.persistent_cache_path, "persistent cache path")? }
             .map(Into::into);
     let persistent_cache_size_bytes = usize::try_from(config.persistent_cache_size_bytes)
-        .map_err(|_| invalid_argument("persistent cache size does not fit this platform"))?;
+        .map_err(|_| Error::invalid_argument("persistent cache size does not fit this platform"))?;
     let persistent_cache_part_size_bytes = usize::try_from(config.persistent_cache_part_size_bytes)
-        .map_err(|_| invalid_argument("persistent cache part size does not fit this platform"))?;
+        .map_err(|_| {
+            Error::invalid_argument("persistent cache part size does not fit this platform")
+        })?;
     if persistent_cache_path.is_some() {
         if persistent_cache_size_bytes == 0 {
-            return Err(invalid_argument(
+            return Err(Error::invalid_argument(
                 "persistent cache size must be greater than zero",
             ));
         }
         if persistent_cache_part_size_bytes == 0 || persistent_cache_part_size_bytes % 1024 != 0 {
-            return Err(invalid_argument(
+            return Err(Error::invalid_argument(
                 "persistent cache part size must be a non-zero multiple of 1024 bytes",
             ));
         }
     }
     let cache_shards = match config.cache_shards {
         0 => None,
-        value => Some(
-            usize::try_from(value)
-                .map_err(|_| invalid_argument("cache shard count does not fit this platform"))?,
-        ),
+        value => Some(usize::try_from(value).map_err(|_| {
+            Error::invalid_argument("cache shard count does not fit this platform")
+        })?),
     };
     Ok(CacheConfig {
         block_cache_size_bytes: config.block_cache_size_bytes,
@@ -277,7 +274,7 @@ unsafe fn parse_cache_config(config: *const FfiCacheConfig) -> Result<CacheConfi
 
 unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlags> {
     let options = unsafe { options.as_ref() }
-        .ok_or_else(|| invalid_argument("open options must not be null"))?;
+        .ok_or_else(|| Error::invalid_argument("open options must not be null"))?;
     Ok(FileOpenFlags {
         read: options.read != 0,
         write: options.write != 0,
@@ -289,16 +286,19 @@ unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlag
 
 unsafe fn require_database_config(config: *const FfiDatabaseConfig) -> Result<SlateDbAccessMode> {
     let config = unsafe { config.as_ref() }
-        .ok_or_else(|| invalid_argument("database config must not be null"))?;
+        .ok_or_else(|| Error::invalid_argument("database config must not be null"))?;
     match config.read_only {
         0 => Ok(SlateDbAccessMode::ReadWrite),
         1 => Ok(SlateDbAccessMode::ReadOnly),
-        _ => Err(invalid_argument("database config read_only must be 0 or 1")),
+        _ => Err(Error::invalid_argument(
+            "database config read_only must be 0 or 1",
+        )),
     }
 }
 
 unsafe fn require_output<'a, T>(output: *mut T, name: &str) -> Result<&'a mut T> {
-    unsafe { output.as_mut() }.ok_or_else(|| invalid_argument(format!("{name} must not be null")))
+    unsafe { output.as_mut() }
+        .ok_or_else(|| Error::invalid_argument(format!("{name} must not be null")))
 }
 
 fn duration_as_milliseconds(duration: std::time::Duration) -> f64 {
@@ -310,14 +310,14 @@ unsafe fn with_file_handle<T>(
     operation: impl FnOnce(&Runtime, &mut (dyn FileHandle + Send)) -> Result<T>,
 ) -> Result<T> {
     let handle = unsafe { handle.as_ref() }
-        .ok_or_else(|| invalid_argument("file handle pointer must not be null"))?;
+        .ok_or_else(|| Error::invalid_argument("file handle pointer must not be null"))?;
     let mut guard = handle
         .handle
         .lock()
-        .map_err(|_| invalid_argument("file handle lock is poisoned"))?;
+        .map_err(|_| Error::invalid_argument("file handle lock is poisoned"))?;
     let file = guard
         .as_mut()
-        .ok_or_else(|| invalid_argument("file handle is closed"))?;
+        .ok_or_else(|| Error::invalid_argument("file handle is closed"))?;
     operation(&handle.runtime, file.as_mut())
 }
 
@@ -326,7 +326,7 @@ unsafe fn read_buffer<'a>(buffer: *mut u8, len: usize) -> Result<&'a mut [u8]> {
         return if len == 0 {
             Ok(&mut [])
         } else {
-            Err(invalid_argument("read buffer must not be null"))
+            Err(Error::invalid_argument("read buffer must not be null"))
         };
     }
     Ok(unsafe { slice::from_raw_parts_mut(buffer, len) })
@@ -337,7 +337,7 @@ unsafe fn write_buffer<'a>(buffer: *const u8, len: usize) -> Result<&'a [u8]> {
         return if len == 0 {
             Ok(&[])
         } else {
-            Err(invalid_argument("write buffer must not be null"))
+            Err(Error::invalid_argument("write buffer must not be null"))
         };
     }
     Ok(unsafe { slice::from_raw_parts(buffer, len) })
@@ -350,15 +350,7 @@ fn create_runtime() -> Result<Arc<Runtime>> {
         .enable_all()
         .build()
         .map(Arc::new)
-        .map_err(|source| {
-            Error::Io(
-                ErrorStruct::new(
-                    "failed to initialize Tokio runtime".to_string(),
-                    ErrorStatus::Permanent,
-                )
-                .with_source(source),
-            )
-        })
+        .map_err(|source| Error::io_with_source("failed to initialize Tokio runtime", source))
 }
 
 #[no_mangle]
@@ -396,7 +388,7 @@ pub unsafe extern "C" fn slatedb_fs_create_local(
         let access_mode = unsafe { require_database_config(database_config)? };
         let root = unsafe { require_path(root, "local root")? };
         if root.is_empty() {
-            return Err(invalid_argument("local root must not be empty"));
+            return Err(Error::invalid_argument("local root must not be empty"));
         }
         let cache_config = unsafe { parse_cache_config(cache_config)? };
         let runtime = create_runtime()?;
@@ -576,7 +568,7 @@ pub unsafe extern "C" fn slatedb_file_read(
 ) -> i32 {
     ffi_result(|| {
         let bytes_read = unsafe { bytes_read.as_mut() }
-            .ok_or_else(|| invalid_argument("bytes read output must not be null"))?;
+            .ok_or_else(|| Error::invalid_argument("bytes read output must not be null"))?;
         *bytes_read = 0;
         let buffer = unsafe { read_buffer(buffer, len)? };
         *bytes_read = unsafe {
@@ -596,7 +588,7 @@ pub unsafe extern "C" fn slatedb_file_pread(
 ) -> i32 {
     ffi_result(|| {
         let bytes_read = unsafe { bytes_read.as_mut() }
-            .ok_or_else(|| invalid_argument("bytes read output must not be null"))?;
+            .ok_or_else(|| Error::invalid_argument("bytes read output must not be null"))?;
         *bytes_read = 0;
         let buffer = unsafe { read_buffer(buffer, len)? };
         *bytes_read = unsafe {
@@ -617,7 +609,7 @@ pub unsafe extern "C" fn slatedb_file_write(
 ) -> i32 {
     ffi_result(|| {
         let bytes_written = unsafe { bytes_written.as_mut() }
-            .ok_or_else(|| invalid_argument("bytes written output must not be null"))?;
+            .ok_or_else(|| Error::invalid_argument("bytes written output must not be null"))?;
         *bytes_written = 0;
         let buffer = unsafe { write_buffer(buffer, len)? };
         *bytes_written = unsafe {
@@ -700,11 +692,11 @@ pub unsafe extern "C" fn slatedb_file_get_size(
 pub unsafe extern "C" fn slatedb_file_close(handle: *mut FfiFileHandle) -> i32 {
     ffi_result(|| {
         let handle = unsafe { handle.as_mut() }
-            .ok_or_else(|| invalid_argument("file handle pointer must not be null"))?;
+            .ok_or_else(|| Error::invalid_argument("file handle pointer must not be null"))?;
         let mut guard = handle
             .handle
             .lock()
-            .map_err(|_| invalid_argument("file handle lock is poisoned"))?;
+            .map_err(|_| Error::invalid_argument("file handle lock is poisoned"))?;
         let Some(file) = guard.as_mut() else {
             return Ok(());
         };

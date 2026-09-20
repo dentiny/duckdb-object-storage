@@ -1,5 +1,4 @@
 use crate::error::{Error, Result};
-use crate::error_struct::{ErrorStatus, ErrorStruct};
 
 /// Access requested when opening a file.
 ///
@@ -88,9 +87,8 @@ impl FileOpenFlags {
             return Ok(());
         };
 
-        Err(Error::InvalidArgument(ErrorStruct::new(
-            format!("invalid file open flags: {reason}"),
-            ErrorStatus::Permanent,
+        Err(Error::invalid_argument(format!(
+            "invalid file open flags: {reason}"
         )))
     }
 
@@ -105,9 +103,8 @@ impl FileOpenFlags {
             return Ok(());
         }
 
-        Err(Error::ReadOnlyViolation(ErrorStruct::new(
-            format!("cannot write to file_id {file_id}: not opened for that access"),
-            ErrorStatus::Permanent,
+        Err(Error::read_only_violation(format!(
+            "cannot write to file_id {file_id}: not opened for that access"
         )))
     }
 
@@ -116,9 +113,8 @@ impl FileOpenFlags {
             return Ok(());
         }
 
-        Err(Error::InvalidArgument(ErrorStruct::new(
-            format!("cannot {operation} file_id {file_id}: not opened for that access"),
-            ErrorStatus::Permanent,
+        Err(Error::invalid_argument(format!(
+            "cannot {operation} file_id {file_id}: not opened for that access"
         )))
     }
 }

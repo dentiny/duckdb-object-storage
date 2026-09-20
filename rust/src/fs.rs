@@ -7,9 +7,8 @@ use slatedb::config::{DbReaderOptions, Settings};
 use slatedb::{Db, DbReader, DbReaderMode, ErrorKind as SlateDbErrorKind};
 
 use crate::cache::{CacheConfig, CacheMetrics};
-use crate::database_metadata::{DatabaseMetadata, ReadOnlyDatabaseMetadata};
+use crate::database_metadata::DatabaseMetadata;
 use crate::error::{Error, Result};
-use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_handle::{FileHandle, SlateFileHandle};
 use crate::flags::FileOpenFlags;
 use crate::io_metrics::IoMetrics;
@@ -83,10 +82,7 @@ impl SlateDbFileSystem {
         access_mode: SlateDbAccessMode,
     ) -> Result<Self> {
         if database_path.is_empty() {
-            return Err(Error::InvalidArgument(ErrorStruct::new(
-                "database path must not be empty".to_string(),
-                ErrorStatus::Permanent,
-            )));
+            return Err(Error::invalid_argument("database path must not be empty"));
         }
 
         let io_metrics = Arc::new(IoMetrics::default());
@@ -171,13 +167,7 @@ impl SlateDbFileSystem {
         access_mode: SlateDbAccessMode,
     ) -> Result<Self> {
         let operator = Operator::new(Memory::default()).map_err(|source| {
-            Error::Io(
-                ErrorStruct::new(
-                    "failed to initialize OpenDAL memory storage".to_string(),
-                    ErrorStatus::Permanent,
-                )
-                .with_source(source),
-            )
+            Error::io_with_source("failed to initialize OpenDAL memory storage", source)
         })?;
         Self::open_with_cache_config(database_path, operator, cache_config, access_mode).await
     }
@@ -203,20 +193,17 @@ impl SlateDbFileSystem {
     ) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         let root_str = root.to_str().ok_or_else(|| {
-            Error::InvalidArgument(ErrorStruct::new(
-                format!("local OpenDAL root is not valid UTF-8: {}", root.display()),
-                ErrorStatus::Permanent,
+            Error::invalid_argument(format!(
+                "local OpenDAL root is not valid UTF-8: {}",
+                root.display()
             ))
         })?;
         tokio::fs::create_dir_all(&root).await?;
 
         let operator = Operator::new(Fs::default().root(root_str)).map_err(|source| {
-            Error::Io(
-                ErrorStruct::new(
-                    format!("failed to initialize OpenDAL storage at {}", root.display()),
-                    ErrorStatus::Permanent,
-                )
-                .with_source(source),
+            Error::io_with_source(
+                format!("failed to initialize OpenDAL storage at {}", root.display()),
+                source,
             )
         })?;
         Self::open_with_cache_config(database_path, operator, cache_config, access_mode).await
@@ -245,13 +232,9 @@ impl SlateDbFileSystem {
                 if flags.write || flags.create || flags.append || flags.truncate_existing {
                     return Err(read_only_violation("open a writable file"));
                 }
-                let reader = Arc::clone(reader.as_ref().ok_or_else(|| {
-                    Error::FileNotFound(ErrorStruct::new(
-                        format!("file not found: {path}"),
-                        ErrorStatus::Permanent,
-                    ))
-                })?);
-                let (file_id, metadata) = ReadOnlyDatabaseMetadata::new(Arc::clone(&reader))
+                let reader =
+                    Arc::clone(reader.as_ref().ok_or_else(|| Error::file_not_found(path))?);
+                let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&reader))
                     .open_file(path)
                     .await?;
                 Ok(Box::new(SlateReadOnlyFileHandle::new(
@@ -270,7 +253,7 @@ impl SlateDbFileSystem {
                     .await
             }
             SlateDbClient::ReadOnly(Some(reader)) => {
-                ReadOnlyDatabaseMetadata::new(Arc::clone(reader))
+                DatabaseMetadata::new(Arc::clone(reader))
                     .file_exists(path)
                     .await
             }
@@ -323,37 +306,26 @@ impl SlateDbFileSystem {
 }
 
 fn filesystem_closed() -> Error {
-    Error::InvalidArgument(ErrorStruct::new(
-        "filesystem is closed".to_string(),
-        ErrorStatus::Permanent,
-    ))
+    Error::invalid_argument("filesystem is closed")
 }
 
 fn read_only_violation(operation: &str) -> Error {
-    Error::ReadOnlyViolation(ErrorStruct::new(
-        format!("read-only SlateDB filesystem cannot {operation}"),
-        ErrorStatus::Permanent,
-    ))
+    Error::read_only_violation(format!("read-only SlateDB filesystem cannot {operation}"))
 }
 
 fn build_s3_operator(config: S3StorageConfig) -> Result<Operator> {
     if config.bucket.is_empty() {
-        return Err(Error::InvalidArgument(ErrorStruct::new(
-            "S3 bucket must not be empty".to_string(),
-            ErrorStatus::Permanent,
-        )));
+        return Err(Error::invalid_argument("S3 bucket must not be empty"));
     }
     if config.key_id.is_some() != config.secret.is_some() {
-        return Err(Error::InvalidArgument(ErrorStruct::new(
-            "S3 key ID and secret must be provided together".to_string(),
-            ErrorStatus::Permanent,
-        )));
+        return Err(Error::invalid_argument(
+            "S3 key ID and secret must be provided together",
+        ));
     }
     if config.session_token.is_some() && config.key_id.is_none() {
-        return Err(Error::InvalidArgument(ErrorStruct::new(
-            "S3 session token requires a key ID and secret".to_string(),
-            ErrorStatus::Permanent,
-        )));
+        return Err(Error::invalid_argument(
+            "S3 session token requires a key ID and secret",
+        ));
     }
 
     // Static libraries do not reliably run OpenDAL's process constructor.
@@ -392,15 +364,8 @@ fn build_s3_operator(config: S3StorageConfig) -> Result<Operator> {
         builder = builder.enable_virtual_host_style();
     }
 
-    Operator::new(builder).map_err(|source| {
-        Error::Io(
-            ErrorStruct::new(
-                "failed to initialize OpenDAL S3 storage".to_string(),
-                ErrorStatus::Permanent,
-            )
-            .with_source(source),
-        )
-    })
+    Operator::new(builder)
+        .map_err(|source| Error::io_with_source("failed to initialize OpenDAL S3 storage", source))
 }
 
 #[cfg(test)]

@@ -51,6 +51,47 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl Error {
+    #[track_caller]
+    pub(crate) fn metadata_decode(message: impl Into<String>) -> Self {
+        Error::MetadataDecode(ErrorStruct::new(message.into(), ErrorStatus::Permanent))
+    }
+
+    #[track_caller]
+    pub(crate) fn metadata_decode_with_source(
+        message: impl Into<String>,
+        source: impl Into<anyhow::Error>,
+    ) -> Self {
+        Error::MetadataDecode(
+            ErrorStruct::new(message.into(), ErrorStatus::Permanent).with_source(source),
+        )
+    }
+
+    #[track_caller]
+    pub(crate) fn file_not_found(path: &str) -> Self {
+        Error::FileNotFound(ErrorStruct::new(
+            format!("file not found: {path}"),
+            ErrorStatus::Permanent,
+        ))
+    }
+
+    #[track_caller]
+    pub(crate) fn read_only_violation(message: impl Into<String>) -> Self {
+        Error::ReadOnlyViolation(ErrorStruct::new(message.into(), ErrorStatus::Permanent))
+    }
+
+    #[track_caller]
+    pub(crate) fn invalid_argument(message: impl Into<String>) -> Self {
+        Error::InvalidArgument(ErrorStruct::new(message.into(), ErrorStatus::Permanent))
+    }
+
+    #[track_caller]
+    pub(crate) fn io_with_source(
+        message: impl Into<String>,
+        source: impl Into<anyhow::Error>,
+    ) -> Self {
+        Error::Io(ErrorStruct::new(message.into(), ErrorStatus::Permanent).with_source(source))
+    }
+
     /// Returns the stable code used by C ABI consumers.
     pub fn code(&self) -> ErrorCode {
         match self {

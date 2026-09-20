@@ -9,7 +9,6 @@ use slatedb::{Db, WriteBatch};
 use crate::chunk_manager::ChunkManager;
 use crate::chunk_store::{ChunkStore, SlateDbChunkStore};
 use crate::error::{Error, Result};
-use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::file_metadata::FileMetadata;
 use crate::flags::FileOpenFlags;
 use crate::keys;
@@ -120,10 +119,7 @@ impl SlateFileHandle {
     }
 
     fn write_overflow(&self) -> Error {
-        Error::InvalidArgument(ErrorStruct::new(
-            format!("write overflow for file_id {}", self.file_id),
-            ErrorStatus::Permanent,
-        ))
+        Error::invalid_argument(format!("write overflow for file_id {}", self.file_id))
     }
 }
 

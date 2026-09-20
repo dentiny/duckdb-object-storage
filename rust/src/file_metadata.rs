@@ -3,7 +3,6 @@
 use prost::Message;
 
 use crate::error::{Error, Result};
-use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::util::current_time_millis;
 
 /// Matches DuckDB's `DEFAULT_BLOCK_ALLOC_SIZE` of 262144.
@@ -34,9 +33,8 @@ impl FileMetadata {
     /// would overflow; neither is worth discovering mid-operation.
     pub(crate) fn validated_chunk_size(&self, file_id: u64) -> Result<usize> {
         let invalid = |reason: String| {
-            Error::InvalidArgument(ErrorStruct::new(
-                format!("invalid chunk size for file_id {file_id}: {reason}"),
-                ErrorStatus::Permanent,
+            Error::invalid_argument(format!(
+                "invalid chunk size for file_id {file_id}: {reason}"
             ))
         };
 
@@ -51,6 +49,7 @@ impl FileMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error_struct::ErrorStatus;
 
     #[test]
     fn protobuf_roundtrip_preserves_metadata() {
