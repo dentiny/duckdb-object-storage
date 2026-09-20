@@ -36,10 +36,22 @@ endif
 endif
 
 define RUN_DUCKDB_TESTS
-TEST_RUN_ROOT=$$(mktemp -d "$${TMPDIR:-/tmp}/duckdb-object-storage-test.XXXXXX"); \
-trap 'rm -rf "$$TEST_RUN_ROOT"' EXIT INT TERM; \
+TEST_PID=; \
+cleanup() { \
+	if [ -n "$$TEST_PID" ]; then \
+		rm -rf "$(PROJ_DIR)duckdb/duckdb_unittest_tempdir/$$TEST_PID" \
+			"$(PROJ_DIR)duckdb/duckdb_unittest_tempdir/$${TEST_PID}_slatedb"; \
+	fi; \
+}; \
+terminate() { \
+	if [ -n "$$TEST_PID" ]; then kill "$$TEST_PID" 2>/dev/null || true; fi; \
+}; \
+trap cleanup EXIT; \
+trap terminate INT TERM; \
 ./build/$(1)/test/unittest --test-config $(DUCKDB_TEST_CONFIG) --test-dir duckdb \
-	--test-temp-dir "$$TEST_RUN_ROOT/duckdb" $(if $(DUCKDB_TEST_FILTER),"$(DUCKDB_TEST_FILTER)")
+	$(if $(DUCKDB_TEST_FILTER),"$(DUCKDB_TEST_FILTER)") & \
+TEST_PID=$$!; \
+wait "$$TEST_PID"
 endef
 
 test_debug_duckdb:
