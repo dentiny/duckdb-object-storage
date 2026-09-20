@@ -36,6 +36,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("duckdb_objfs_persistent_cache_on_compaction",
 	                          "Populate the persistent cache from compaction output", LogicalType::BOOLEAN,
 	                          Value(false));
+	config.AddExtensionOption("duckdb_objfs_read_consistency",
+	                          "Read consistency for read-only attachments: 'strong' opens a fresh snapshot that "
+	                          "sees the latest committed state on every attach, 'eventual' reuses a cached SlateDB "
+	                          "reader that catches up roughly every 10 seconds; 'auto' (default) is strong for the "
+	                          "memory and local backends and eventual for s3",
+	                          LogicalType::VARCHAR, Value("auto"));
 	auto file_system = make_uniq<SlateDBFileSystem>();
 	loader.RegisterFunction(GetSlateDBCacheStatsFunction(*file_system));
 	loader.RegisterFunction(GetSlateDBIoStatsFunction(*file_system));

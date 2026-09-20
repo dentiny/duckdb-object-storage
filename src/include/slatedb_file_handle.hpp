@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/file_system.hpp"
+#include "slatedb_file_system.hpp"
 #include "slatedb_fs.h"
 
 #include <memory>
@@ -24,6 +25,9 @@ private:
 
 	slatedb_file_handle *GetHandle() const;
 
+	//! Dedicated snapshot filesystem owned by this handle, set for strong read-consistency read-only opens.
+	//! Declared before `impl` so the handle is closed and destroyed before the filesystem it belongs to.
+	unique_ptr<slatedb_fs, SlateDBFsDeleter> owned_fs;
 	unique_ptr<slatedb_file_handle, SlateDBFileHandleDeleter> impl;
 };
 

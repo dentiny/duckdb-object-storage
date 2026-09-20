@@ -65,36 +65,59 @@ SlateDBFileSystem::SlateDBFileSystem() {
 
 unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateInMemory() {
 	auto result = make_uniq<SlateDBFileSystem>();
-	result->InitializeMemory(DatabaseInitializationConfig());
+	result->read_write_impl = result->InitializeMemory(DatabaseInitializationConfig());
+	// Keep the initialization config consistent so lazy read-only opens reuse this backend.
+	auto config = make_uniq<InitializationConfig>();
+	config->backend = "memory";
+	result->initialization_config = std::move(config);
 	return result;
 }
 
 unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocal(const string &root) {
 	auto result = make_uniq<SlateDBFileSystem>();
-	result->InitializeLocal(root, DatabaseInitializationConfig());
+	result->read_write_impl = result->InitializeLocal(root, DatabaseInitializationConfig());
+	// Keep the initialization config consistent so lazy read-only opens reuse this backend.
+	auto config = make_uniq<InitializationConfig>();
+	config->backend = "local";
+	config->local_root = root;
+	result->initialization_config = std::move(config);
 	return result;
 }
 
-void SlateDBFileSystem::InitializeMemory(const DatabaseInitializationConfig &config) {
+unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocalReadOnly(const string &root) {
+	auto result = make_uniq<SlateDBFileSystem>();
+	DatabaseInitializationConfig database_config;
+	database_config.read_only = true;
+	result->read_only_impl = result->InitializeLocal(root, database_config);
+	// Keep the initialization config consistent so read-only opens reuse this backend.
+	auto config = make_uniq<InitializationConfig>();
+	config->backend = "local";
+	config->local_root = root;
+	result->initialization_config = std::move(config);
+	return result;
+}
+
+unique_ptr<slatedb_fs, SlateDBFsDeleter> SlateDBFileSystem::InitializeMemory(const DatabaseInitializationConfig &config) {
 	slatedb_fs *ptr = nullptr;
 	auto ffi_cache = ConvertCacheConfig(config.cache);
 	auto ffi_database = ConvertDatabaseConfig(config);
 	auto code = slatedb_fs_create_memory(&ffi_cache, &ffi_database, &ptr);
 	ThrowSlateDBError(code, "initialize in-memory SlateDB filesystem");
-	(config.read_only ? read_only_impl : read_write_impl).reset(ptr);
+	return unique_ptr<slatedb_fs, SlateDBFsDeleter>(ptr);
 }
 
-void SlateDBFileSystem::InitializeLocal(const string &root, const DatabaseInitializationConfig &config) {
+unique_ptr<slatedb_fs, SlateDBFsDeleter> SlateDBFileSystem::InitializeLocal(const string &root,
+                                                                            const DatabaseInitializationConfig &config) {
 	slatedb_fs *ptr = nullptr;
 	auto ffi_cache = ConvertCacheConfig(config.cache);
 	auto ffi_database = ConvertDatabaseConfig(config);
 	auto code = slatedb_fs_create_local(root.c_str(), &ffi_cache, &ffi_database, &ptr);
 	ThrowSlateDBError(code, "initialize local SlateDB filesystem");
-	(config.read_only ? read_only_impl : read_write_impl).reset(ptr);
+	return unique_ptr<slatedb_fs, SlateDBFsDeleter>(ptr);
 }
 
-void SlateDBFileSystem::InitializeS3(const S3InitializationConfig &s3_config,
-                                     const DatabaseInitializationConfig &config) {
+unique_ptr<slatedb_fs, SlateDBFsDeleter>
+SlateDBFileSystem::InitializeS3(const S3InitializationConfig &s3_config, const DatabaseInitializationConfig &config) {
 	slatedb_s3_config ffi_config {
 	    s3_config.bucket.c_str(),        s3_config.root.c_str(),   s3_config.endpoint.c_str(),
 	    s3_config.region.c_str(),        s3_config.key_id.c_str(), s3_config.secret.c_str(),
@@ -105,7 +128,7 @@ void SlateDBFileSystem::InitializeS3(const S3InitializationConfig &s3_config,
 	slatedb_fs *ptr = nullptr;
 	auto code = slatedb_fs_create_s3(&ffi_config, &ffi_cache, &ffi_database, &ptr);
 	ThrowSlateDBError(code, "initialize S3-backed SlateDB filesystem");
-	(config.read_only ? read_only_impl : read_write_impl).reset(ptr);
+	return unique_ptr<slatedb_fs, SlateDBFsDeleter>(ptr);
 }
 
 SlateDBFileSystem::InitializationConfig SlateDBFileSystem::ReadInitializationConfig(optional_ptr<FileOpener> opener) {
@@ -148,6 +171,40 @@ void SlateDBFileSystem::EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> o
 	buffer_manager.SetTemporaryDirectory(local_directory);
 }
 
+unique_ptr<slatedb_fs, SlateDBFsDeleter> SlateDBFileSystem::CreateFileSystemLocked(bool read_only) {
+	D_ASSERT(initialization_config);
+	auto &config = *initialization_config;
+	DatabaseInitializationConfig database_config;
+	database_config.cache = config.cache;
+	database_config.read_only = read_only;
+	if (config.backend == "memory") {
+		return InitializeMemory(database_config);
+	}
+	if (config.backend == "local") {
+		return InitializeLocal(config.local_root, database_config);
+	}
+	D_ASSERT(config.backend == "s3");
+	return InitializeS3(config.s3, database_config);
+}
+
+bool SlateDBFileSystem::ResolveStrongReadConsistency(optional_ptr<FileOpener> opener) const {
+	D_ASSERT(initialization_config);
+	auto value = StringUtil::Lower(GetOptionalSetting(opener, "duckdb_objfs_read_consistency"));
+	if (value.empty() || value == "auto") {
+		// Reading the latest committed state costs one manifest read per open: cheap for
+		// the in-process backends, an object-store round trip for remote ones.
+		return initialization_config->backend != "s3";
+	}
+	if (value == "strong") {
+		return true;
+	}
+	if (value == "eventual") {
+		return false;
+	}
+	throw InvalidConfigurationException(
+	    "Unsupported duckdb_objfs_read_consistency '%s'; expected 'auto', 'strong', or 'eventual'", value);
+}
+
 slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> opener, bool read_only) {
 	lock_guard<mutex> guard(initialization_lock);
 	EnsureTemporaryFilesStayLocal(opener);
@@ -162,18 +219,7 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 	if (!initialization_config) {
 		initialization_config = make_uniq<InitializationConfig>(ReadInitializationConfig(opener));
 	}
-	auto &config = *initialization_config;
-	DatabaseInitializationConfig database_config;
-	database_config.cache = config.cache;
-	database_config.read_only = read_only;
-	if (config.backend == "memory") {
-		InitializeMemory(database_config);
-	} else if (config.backend == "local") {
-		InitializeLocal(config.local_root, database_config);
-	} else {
-		D_ASSERT(config.backend == "s3");
-		InitializeS3(config.s3, database_config);
-	}
+	selected_impl = CreateFileSystemLocked(read_only);
 	return selected_impl.get();
 }
 
@@ -204,13 +250,39 @@ unique_ptr<FileHandle> SlateDBFileSystem::OpenFile(const string &path, FileOpenF
 	slatedb_file_handle *handle = nullptr;
 	auto logical_path = GetLogicalPath(path);
 	auto read_only = !flags.OpenForWriting();
-	auto code = slatedb_fs_open_file(GetOrCreateFileSystem(opener, read_only), logical_path.c_str(), &options, &handle);
+
+	slatedb_fs *fs = nullptr;
+	unique_ptr<slatedb_fs, SlateDBFsDeleter> snapshot_fs;
+	if (read_only) {
+		lock_guard<mutex> guard(initialization_lock);
+		EnsureTemporaryFilesStayLocal(opener);
+		if (!initialization_config) {
+			initialization_config = make_uniq<InitializationConfig>(ReadInitializationConfig(opener));
+		}
+		if (read_write_impl) {
+			// Reads through the read-write instance always see the latest committed state.
+			fs = read_write_impl.get();
+		} else if (ResolveStrongReadConsistency(opener)) {
+			// Strong read consistency: open through a dedicated snapshot reader rebuilt on
+			// every open, owned by the returned handle. This matches the DuckDB expectation
+			// that a fresh read-only ATTACH sees the latest committed state.
+			snapshot_fs = CreateFileSystemLocked(true);
+			fs = snapshot_fs.get();
+		}
+	}
+	if (!fs) {
+		fs = GetOrCreateFileSystem(opener, read_only);
+	}
+
+	auto code = slatedb_fs_open_file(fs, logical_path.c_str(), &options, &handle);
 	if ((code == SLATEDB_FS_ERROR_FILE_NOT_FOUND && flags.ReturnNullIfNotExists()) ||
 	    (code == SLATEDB_FS_ERROR_FILE_ALREADY_EXISTS && flags.ReturnNullIfExists())) {
 		return nullptr;
 	}
 	ThrowSlateDBError(code, "open file");
-	return make_uniq<SlateDBFileHandle>(*this, path, flags, handle);
+	auto result = make_uniq<SlateDBFileHandle>(*this, path, flags, handle);
+	result->owned_fs = std::move(snapshot_fs);
+	return result;
 }
 
 void SlateDBFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {

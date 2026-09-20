@@ -22,6 +22,8 @@ void SlateDBFileHandle::Close() {
 	}
 	ThrowSlateDBError(slatedb_file_close(impl.get()), "close file");
 	impl.reset();
+	// Release the dedicated snapshot filesystem, if this handle owns one.
+	owned_fs.reset();
 }
 
 slatedb_file_handle *SlateDBFileHandle::GetHandle() const {

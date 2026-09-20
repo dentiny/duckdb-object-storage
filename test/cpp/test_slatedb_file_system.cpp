@@ -188,6 +188,60 @@ TEST_CASE("SlateDBFileSystem forwards file catalog operations", "[slatedb_fs]") 
 	});
 }
 
+TEST_CASE("Strong read consistency re-reads the latest committed state", "[slatedb_fs]") {
+	auto local_fs = FileSystem::CreateLocal();
+	const char *temp_directory = std::getenv("TMPDIR");
+#ifdef _WIN32
+	if (!temp_directory) {
+		temp_directory = std::getenv("TEMP");
+	}
+#endif
+	if (!temp_directory) {
+		temp_directory = "/tmp";
+	}
+	auto local_root = local_fs->JoinPath(
+	    temp_directory, StringUtil::Format("duckdb_objfs_cpp_%s", UUID::ToString(UUID::GenerateRandomUUID())));
+	ScopedDirectory local_directory(std::move(local_root));
+
+	const string path = "duckdb_objfs://consistency.db";
+	auto writer = SlateDBFileSystem::CreateLocal(local_directory.GetPath());
+	{
+		auto handle = CreateFile(*writer, path);
+		std::array<uint8_t, 3> initial {'a', 'a', 'a'};
+		REQUIRE(writer->Write(*handle, initial.data(), initial.size()) == 3);
+		handle->Close();
+	}
+
+	// A reader-only filesystem, simulating a second process attaching read-only.
+	auto reader = SlateDBFileSystem::CreateLocalReadOnly(local_directory.GetPath());
+	{
+		auto handle = reader->OpenFile(path, FileFlags::FILE_FLAGS_READ);
+		std::array<uint8_t, 3> output {};
+		std::array<uint8_t, 3> expected {'a', 'a', 'a'};
+		reader->Read(*handle, output.data(), output.size(), 0);
+		REQUIRE(output == expected);
+		handle->Close();
+	}
+
+	{
+		auto handle = writer->OpenFile(path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_WRITE);
+		std::array<uint8_t, 3> updated {'b', 'b', 'b'};
+		writer->Write(*handle, updated.data(), updated.size(), 0);
+		handle->Close();
+	}
+
+	// A fresh read-only open observes the latest committed state, even though `reader`
+	// was created before the update; a cached reader would still serve the old state.
+	// The handle is intentionally destroyed without Close() to exercise cleanup.
+	{
+		auto handle = reader->OpenFile(path, FileFlags::FILE_FLAGS_READ);
+		std::array<uint8_t, 3> output {};
+		std::array<uint8_t, 3> expected {'b', 'b', 'b'};
+		reader->Read(*handle, output.data(), output.size(), 0);
+		REQUIRE(output == expected);
+	}
+}
+
 TEST_CASE("SlateDBFileSystem converts FFI errors to DuckDB exceptions", "[slatedb_fs]") {
 	RunForEachBackend([](SlateDBFileSystem *fs) {
 		auto writable = CreateFile(*fs, "duckdb_objfs://readonly.db");

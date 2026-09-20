@@ -193,3 +193,30 @@ ATTACH 'duckdb_objfs://database.db' AS object_db (READ_ONLY);
 SELECT * FROM object_db.items;
 ```
 
+## Read consistency
+
+A read-only attachment sees the database state captured by a SlateDB snapshot
+reader. `duckdb_objfs_read_consistency` controls how fresh that snapshot is:
+
+- `strong`: every read-only `ATTACH` builds a fresh snapshot reader, so the
+  attachment sees the latest committed state. This costs one manifest read per
+  attach.
+- `eventual`: read-only attachments share a cached SlateDB reader that follows
+  the writer's manifest roughly every 10 seconds
+  ([`DbReaderOptions::manifest_poll_interval`](https://slatedb.io/docs/design/readers/)),
+  so data committed by another process can stay invisible for up to that
+  interval, including across detach/reattach. No per-attach manifest reads.
+
+The default, `auto`, uses `strong` for the `memory` and `local` backends, where
+reading the latest manifest is cheap, and `eventual` for the `s3` backend,
+where each manifest read is an object-store request. Set the mode explicitly to
+override:
+
+```sql
+SET duckdb_objfs_read_consistency = 'strong';
+```
+
+While a read-write attachment exists in the same process, read-only opens are
+served by the read-write SlateDB instance and always see the latest committed
+state, regardless of this setting.
+

@@ -19,6 +19,9 @@ public:
 	SlateDBFileSystem();
 	static unique_ptr<SlateDBFileSystem> CreateInMemory();
 	static unique_ptr<SlateDBFileSystem> CreateLocal(const string &root);
+	//! Creates a filesystem whose local backend is initialized in read-only mode. Used by tests to exercise
+	//! read-only opens without a read-write instance in the same process.
+	static unique_ptr<SlateDBFileSystem> CreateLocalReadOnly(const string &root);
 
 	unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags flags,
 	                                optional_ptr<FileOpener> opener = nullptr) override;
@@ -58,10 +61,17 @@ private:
 	};
 
 	void EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> opener);
-	void InitializeMemory(const DatabaseInitializationConfig &config);
-	void InitializeLocal(const string &root, const DatabaseInitializationConfig &config);
-	void InitializeS3(const S3InitializationConfig &s3_config, const DatabaseInitializationConfig &config);
+	unique_ptr<slatedb_fs, SlateDBFsDeleter> InitializeMemory(const DatabaseInitializationConfig &config);
+	unique_ptr<slatedb_fs, SlateDBFsDeleter> InitializeLocal(const string &root,
+	                                                         const DatabaseInitializationConfig &config);
+	unique_ptr<slatedb_fs, SlateDBFsDeleter> InitializeS3(const S3InitializationConfig &s3_config,
+	                                                      const DatabaseInitializationConfig &config);
 	InitializationConfig ReadInitializationConfig(optional_ptr<FileOpener> opener);
+	//! Creates a filesystem from the cached initialization config. Caller must hold initialization_lock.
+	unique_ptr<slatedb_fs, SlateDBFsDeleter> CreateFileSystemLocked(bool read_only);
+	//! Whether read-only opens rebuild a fresh snapshot reader instead of reusing the cached one.
+	//! Caller must hold initialization_lock and have initialized initialization_config.
+	bool ResolveStrongReadConsistency(optional_ptr<FileOpener> opener) const;
 	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener, bool read_only);
 
 	mutex initialization_lock;
