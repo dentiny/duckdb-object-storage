@@ -199,7 +199,22 @@ impl SlateDbFileSystem {
         })?;
         tokio::fs::create_dir_all(&root).await?;
 
-        let operator = Operator::new(Fs::default().root(root_str)).map_err(|source| {
+        // SlateDB updates manifests while background tasks may read them. OpenDAL's
+        // FS service otherwise truncates the destination before writing, exposing
+        // partial (including empty) manifests to concurrent readers.
+        let atomic_write_dir = root.join(".atomic-write");
+        let atomic_write_dir_str = atomic_write_dir.to_str().ok_or_else(|| {
+            Error::invalid_argument(format!(
+                "local OpenDAL atomic write directory is not valid UTF-8: {}",
+                atomic_write_dir.display()
+            ))
+        })?;
+        let operator = Operator::new(
+            Fs::default()
+                .root(root_str)
+                .atomic_write_dir(atomic_write_dir_str),
+        )
+        .map_err(|source| {
             Error::io_with_source(
                 format!("failed to initialize OpenDAL storage at {}", root.display()),
                 source,
