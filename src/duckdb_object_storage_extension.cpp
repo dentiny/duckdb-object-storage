@@ -5,7 +5,11 @@
 #include "slatedb_config_utils.hpp"
 #include "slatedb_file_system.hpp"
 #include "slatedb_io_stats.hpp"
+#include "duckdb/common/crypto/md5.hpp"
+#include "duckdb/function/pragma_function.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
 
 namespace duckdb {
 
@@ -13,6 +17,33 @@ namespace duckdb {
 	[](ClientContext &context, SetScope, Value &value) {                                                               \
 		CheckFrozenSlateDBSetting(context, SETTING_NAME, value);                                                       \
 	}
+
+namespace {
+
+string AttachMappedDatabase(ClientContext &context, const FunctionParameters &parameters) {
+	auto &database_manager = DatabaseManager::Get(context);
+	auto &default_database_name = DatabaseManager::GetDefaultDatabase(context);
+	auto default_database = database_manager.GetDatabase(context, default_database_name);
+	if (!default_database) {
+		throw InternalException("Cannot resolve the current database for SlateDB path mapping");
+	}
+
+	auto source_path = default_database->StoredPath();
+	if (source_path.empty()) {
+		source_path = ":memory:";
+	}
+
+	MD5Context md5;
+	md5.Add(source_path);
+	auto mapped_path = StringUtil::Format("duckdb_objfs://mapped_%s.db", md5.FinishHex());
+	auto catalog_name = parameters.values[0].GetValue<string>();
+
+	return StringUtil::Format("ATTACH IF NOT EXISTS %s AS %s%s", KeywordHelper::WriteQuoted(mapped_path, '\''),
+	                          KeywordHelper::WriteOptionallyQuoted(catalog_name),
+	                          default_database->IsReadOnly() ? " (READ_ONLY)" : "");
+}
+
+} // namespace
 
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &instance = loader.GetDatabaseInstance();
@@ -55,6 +86,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto file_system = make_uniq<SlateDBFileSystem>();
 	loader.RegisterFunction(GetSlateDBCacheStatsFunction(*file_system));
 	loader.RegisterFunction(GetSlateDBIoStatsFunction(*file_system));
+	loader.RegisterFunction(PragmaFunction::PragmaCall("duckdb_objfs_attach_mapped_database", AttachMappedDatabase,
+	                                                   {LogicalType::VARCHAR}));
 	instance.GetFileSystem().RegisterSubSystem(std::move(file_system));
 }
 

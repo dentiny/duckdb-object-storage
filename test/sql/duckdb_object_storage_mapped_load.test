@@ -1,0 +1,66 @@
+# name: test/sql/duckdb_object_storage_mapped_load.test
+# description: Map SQLLogicTest load paths to persistent SlateDB databases
+# group: [sql]
+
+require duckdb_object_storage
+
+load __TEST_DIR__/duckdb_objfs_mapped_load.db
+
+statement ok
+SET duckdb_objfs_backend = 'local'
+
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
+
+statement ok
+PRAGMA duckdb_objfs_attach_mapped_database('mapped_db')
+
+statement ok
+USE mapped_db
+
+statement ok
+CREATE TABLE persisted(i INTEGER)
+
+statement ok
+INSERT INTO persisted VALUES (42)
+
+# The SQLLogicTest runner restores the search path before reloading extensions requested by the test, so leave the mapped catalog before restarting.
+statement ok
+USE duckdb_objfs_mapped_load
+
+restart
+
+statement ok
+PRAGMA duckdb_objfs_attach_mapped_database('mapped_db')
+
+statement ok
+USE mapped_db
+
+query I
+SELECT * FROM persisted
+----
+42
+
+load __TEST_DIR__/duckdb_objfs_mapped_load.db readonly
+
+statement ok
+SET duckdb_objfs_backend = 'local'
+
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
+
+statement ok
+PRAGMA duckdb_objfs_attach_mapped_database('mapped_db')
+
+statement ok
+USE mapped_db
+
+query I
+SELECT * FROM persisted
+----
+42
+
+statement error
+CREATE TABLE rejected(i INTEGER)
+----
+read-only
