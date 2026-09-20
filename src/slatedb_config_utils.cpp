@@ -2,6 +2,8 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/main/secret/secret.hpp"
 
 namespace duckdb {
@@ -90,6 +92,44 @@ CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener>
 	result.persistent_cache_on_compaction = GetSettingOrDefault<bool>(
 	    opener, "duckdb_objfs_persistent_cache_on_compaction", result.persistent_cache_on_compaction);
 	return result;
+}
+
+void CheckFrozenSlateDBSetting(ClientContext &context, const string &name, const Value &new_value) {
+	auto frozen = context.db->GetObjectCache().Get<FrozenSlateDBSettings>(FrozenSlateDBSettings::CACHE_KEY);
+	if (!frozen) {
+		// The filesystem has not been initialized yet; the setting still takes effect.
+		return;
+	}
+	auto entry = frozen->values.find(name);
+	if (entry == frozen->values.end()) {
+		// Not an initialization setting.
+		return;
+	}
+
+	auto raw_string = new_value.IsNull() ? "" : new_value.GetValue<string>();
+	string effective;
+	if (name == "duckdb_objfs_backend") {
+		effective = StringUtil::Lower(raw_string);
+		if (effective.empty()) {
+			effective = "local";
+		}
+	} else if (name == "duckdb_objfs_root") {
+		effective = raw_string;
+		auto &backend = frozen->values.at("duckdb_objfs_backend");
+		if (backend != "memory" && effective.empty()) {
+			effective = backend == "s3" ? "duckdb_objfs" : ".duckdb_objfs";
+		}
+	} else {
+		effective = new_value.IsNull() ? "" : new_value.ToString();
+	}
+
+	// slatedb and foyer doesn't allow runtime configuration changes, so directly throw an error.
+	if (effective != entry->second) {
+		throw InvalidConfigurationException(
+		    "Cannot change setting '%s' from '%s' to '%s': the SlateDB filesystem is already initialized. "
+		    "Restart the database to use a different value.",
+		    name, entry->second, effective);
+	}
 }
 
 } // namespace duckdb

@@ -1,8 +1,14 @@
 #pragma once
 
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/file_opener.hpp"
+#include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
+
+// Forward declarations
+class ClientContext;
+class Value;
 
 struct S3InitializationConfig {
 	//! S3 bucket that stores SlateDB objects.
@@ -49,9 +55,34 @@ struct DatabaseInitializationConfig {
 	bool read_only = false;
 };
 
+// Snapshot of the settings the SlateDB filesystem was initialized with, runtime configs are rejected if they differ
+// from the snapshot. Values are stored in their normalized Value::ToString() form so the set callback can compare
+// with a single map lookup.
+struct FrozenSlateDBSettings : public ObjectCacheEntry {
+	static constexpr const char *CACHE_KEY = "duckdb_objfs_frozen_settings";
+
+	//! Normalized effective value per initialization setting name.
+	case_insensitive_map_t<string> values;
+
+	static string ObjectType() {
+		return CACHE_KEY;
+	}
+	string GetObjectType() override {
+		return ObjectType();
+	}
+	//! Never evict: the snapshot must live as long as the database instance.
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx();
+	}
+};
+
 string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name);
 string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name);
 S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener);
 CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener> opener);
+
+//! Throws if the SlateDB filesystem is already initialized and `new_value` differs from the value the filesystem was
+//! initialized with.
+void CheckFrozenSlateDBSetting(ClientContext &context, const string &name, const Value &new_value);
 
 } // namespace duckdb

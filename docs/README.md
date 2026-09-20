@@ -121,10 +121,13 @@ SET duckdb_objfs_persistent_cache_on_flush = false;
 SET duckdb_objfs_persistent_cache_on_compaction = false;
 ```
 
-The part size must be a non-zero multiple of 1024 bytes. Cache settings are
-read once when the filesystem is initialized. Configure them before the first
-`duckdb_objfs://` access; changing these settings afterward does not
-reconfigure the running cache.
+The part size must be a non-zero multiple of 1024 bytes.
+
+All `duckdb_objfs_*` settings — the backend, root, bucket, and the cache
+settings above — are read once when the filesystem is initialized, at the
+first `duckdb_objfs://` access. Configure them beforehand: changing any of
+them afterwards fails with an error instead of being silently ignored.
+Restart the database to use different values.
 
 ## Cache statistics
 

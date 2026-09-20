@@ -7,7 +7,7 @@ require duckdb_object_storage
 load __TEST_DIR__/duckdb_objfs_read_only_runner.db
 
 statement ok
-SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_read_only_backend'
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
 
 # Seed two logical databases in the shared SlateDB namespace.
 statement ok
@@ -44,7 +44,7 @@ DETACH writer_seed
 restart
 
 statement ok reader
-SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_read_only_backend'
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
 
 statement ok reader
 ATTACH 'duckdb_objfs://reader.db' AS reader_db (READ_ONLY)
@@ -68,7 +68,7 @@ SELECT sum(i) FROM reader_db.items
 10
 
 statement ok writer
-SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_read_only_backend'
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
 
 statement ok writer
 ATTACH 'duckdb_objfs://writer.db' AS writer_db

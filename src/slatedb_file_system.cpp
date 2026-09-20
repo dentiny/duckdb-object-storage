@@ -148,6 +148,36 @@ void SlateDBFileSystem::EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> o
 	buffer_manager.SetTemporaryDirectory(local_directory);
 }
 
+void SlateDBFileSystem::FreezeSettingsSnapshot(optional_ptr<FileOpener> opener, const InitializationConfig &config) {
+	auto database = FileOpener::TryGetDatabase(opener);
+	if (!database) {
+		return;
+	}
+	auto frozen = make_shared_ptr<FrozenSlateDBSettings>();
+	auto &values = frozen->values;
+	values["duckdb_objfs_backend"] = config.backend;
+	if (config.backend == "local") {
+		values["duckdb_objfs_root"] = config.local_root;
+	} else if (config.backend == "s3") {
+		values["duckdb_objfs_root"] = config.s3.root;
+	} else {
+		values["duckdb_objfs_root"] = GetOptionalSetting(opener, "duckdb_objfs_root");
+	}
+	values["duckdb_objfs_bucket"] = config.backend == "s3" ? config.s3.bucket : "";
+	values["duckdb_objfs_memory_cache_size"] = Value::UBIGINT(config.cache.block_cache_size_bytes).ToString();
+	values["duckdb_objfs_metadata_cache_size"] = Value::UBIGINT(config.cache.metadata_cache_size_bytes).ToString();
+	values["duckdb_objfs_cache_shards"] = Value::UBIGINT(config.cache.cache_shards).ToString();
+	values["duckdb_objfs_persistent_cache_path"] = config.cache.persistent_cache_path;
+	values["duckdb_objfs_persistent_cache_size"] = Value::UBIGINT(config.cache.persistent_cache_size_bytes).ToString();
+	values["duckdb_objfs_persistent_cache_part_size"] =
+	    Value::UBIGINT(config.cache.persistent_cache_part_size_bytes).ToString();
+	values["duckdb_objfs_persistent_cache_on_flush"] =
+	    Value::BOOLEAN(config.cache.persistent_cache_on_flush).ToString();
+	values["duckdb_objfs_persistent_cache_on_compaction"] =
+	    Value::BOOLEAN(config.cache.persistent_cache_on_compaction).ToString();
+	database->GetObjectCache().Put(FrozenSlateDBSettings::CACHE_KEY, std::move(frozen));
+}
+
 slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> opener, bool read_only) {
 	lock_guard<mutex> guard(initialization_lock);
 	EnsureTemporaryFilesStayLocal(opener);
@@ -161,6 +191,7 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 
 	if (!initialization_config) {
 		initialization_config = make_uniq<InitializationConfig>(ReadInitializationConfig(opener));
+		FreezeSettingsSnapshot(opener, *initialization_config);
 	}
 	auto &config = *initialization_config;
 	DatabaseInitializationConfig database_config;

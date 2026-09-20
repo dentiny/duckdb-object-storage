@@ -62,6 +62,7 @@ private:
 	void InitializeLocal(const string &root, const DatabaseInitializationConfig &config);
 	void InitializeS3(const S3InitializationConfig &s3_config, const DatabaseInitializationConfig &config);
 	InitializationConfig ReadInitializationConfig(optional_ptr<FileOpener> opener);
+	void FreezeSettingsSnapshot(optional_ptr<FileOpener> opener, const InitializationConfig &config);
 	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener, bool read_only);
 
 	mutex initialization_lock;
