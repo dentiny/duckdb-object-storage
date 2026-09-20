@@ -57,8 +57,8 @@ S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opene
 	}
 	FileOpenerInfo info {secret_path};
 	KeyValueSecretReader secret_reader(*opener, &info, "s3");
-	result.key_id = secret_reader.GetSecretKey("key_id").GetValue<string>();
-	result.secret = secret_reader.GetSecretKey("secret").GetValue<string>();
+	secret_reader.TryGetSecretKey("key_id", result.key_id);
+	secret_reader.TryGetSecretKey("secret", result.secret);
 	secret_reader.TryGetSecretKey("session_token", result.session_token);
 	secret_reader.TryGetSecretKey("endpoint", result.endpoint);
 	secret_reader.TryGetSecretKey("region", result.region);
