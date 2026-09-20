@@ -1,0 +1,24 @@
+# name: test/sql/duckdb_object_storage_data_files_csv.test
+# description: CSV data files flow through other filesystems; duckdb_objfs:// only stores database files
+# group: [sql]
+
+require duckdb_object_storage
+
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_data_files_csv'
+
+statement ok
+ATTACH 'duckdb_objfs://data_files_csv.db' AS object_db
+
+# CSV on the local filesystem: read into the SlateDB-backed database, then read back
+statement ok
+COPY (SELECT 1 AS i, 'alice' AS name UNION ALL SELECT 2 AS i, 'bob' AS name) TO '__TEST_DIR__/input.csv' (HEADER)
+
+statement ok
+CREATE TABLE object_db.from_csv AS SELECT * FROM read_csv('__TEST_DIR__/input.csv')
+
+query IT
+SELECT * FROM object_db.from_csv ORDER BY i
+----
+1	alice
+2	bob

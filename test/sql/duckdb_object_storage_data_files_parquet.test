@@ -1,0 +1,27 @@
+# name: test/sql/duckdb_object_storage_data_files_parquet.test
+# description: Parquet data files round-trip through the local filesystem into a SlateDB-backed database
+# group: [sql]
+
+# Skipped unless the parquet extension is statically built into the test binary.
+require duckdb_object_storage
+
+require parquet
+
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_data_files_parquet'
+
+statement ok
+ATTACH 'duckdb_objfs://data_files_parquet.db' AS object_db
+
+# Parquet on the local filesystem: write, read back, store in the SlateDB-backed database
+statement ok
+COPY (SELECT 10 AS i, 'x' AS name UNION ALL SELECT 20 AS i, 'y' AS name) TO '__TEST_DIR__/input.parquet' (FORMAT PARQUET)
+
+statement ok
+CREATE TABLE object_db.from_parquet AS SELECT * FROM read_parquet('__TEST_DIR__/input.parquet')
+
+query IT
+SELECT * FROM object_db.from_parquet ORDER BY i
+----
+10	x
+20	y
