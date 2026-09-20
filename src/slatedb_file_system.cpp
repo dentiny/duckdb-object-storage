@@ -48,8 +48,8 @@ slatedb_cache_config ConvertCacheConfig(const CacheInitializationConfig &config)
 	        config.persistent_cache_on_compaction};
 }
 
-slatedb_db_config ConvertDatabaseConfig(bool read_only) {
-	return {read_only};
+slatedb_db_config ConvertDatabaseConfig(const DatabaseInitializationConfig &config) {
+	return {config.read_only};
 }
 
 } // namespace
@@ -65,47 +65,47 @@ SlateDBFileSystem::SlateDBFileSystem() {
 
 unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateInMemory() {
 	auto result = make_uniq<SlateDBFileSystem>();
-	result->InitializeMemory(CacheInitializationConfig(), false);
+	result->InitializeMemory(DatabaseInitializationConfig());
 	return result;
 }
 
 unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocal(const string &root) {
 	auto result = make_uniq<SlateDBFileSystem>();
-	result->InitializeLocal(root, CacheInitializationConfig(), false);
+	result->InitializeLocal(root, DatabaseInitializationConfig());
 	return result;
 }
 
-void SlateDBFileSystem::InitializeMemory(const CacheInitializationConfig &cache, bool read_only) {
+void SlateDBFileSystem::InitializeMemory(const DatabaseInitializationConfig &config) {
 	slatedb_fs *ptr = nullptr;
-	auto ffi_cache = ConvertCacheConfig(cache);
-	auto ffi_database = ConvertDatabaseConfig(read_only);
+	auto ffi_cache = ConvertCacheConfig(config.cache);
+	auto ffi_database = ConvertDatabaseConfig(config);
 	auto code = slatedb_fs_create_memory(&ffi_cache, &ffi_database, &ptr);
 	ThrowSlateDBError(code, "initialize in-memory SlateDB filesystem");
-	(read_only ? read_only_impl : read_write_impl).reset(ptr);
+	(config.read_only ? read_only_impl : read_write_impl).reset(ptr);
 }
 
-void SlateDBFileSystem::InitializeLocal(const string &root, const CacheInitializationConfig &cache, bool read_only) {
+void SlateDBFileSystem::InitializeLocal(const string &root, const DatabaseInitializationConfig &config) {
 	slatedb_fs *ptr = nullptr;
-	auto ffi_cache = ConvertCacheConfig(cache);
-	auto ffi_database = ConvertDatabaseConfig(read_only);
+	auto ffi_cache = ConvertCacheConfig(config.cache);
+	auto ffi_database = ConvertDatabaseConfig(config);
 	auto code = slatedb_fs_create_local(root.c_str(), &ffi_cache, &ffi_database, &ptr);
 	ThrowSlateDBError(code, "initialize local SlateDB filesystem");
-	(read_only ? read_only_impl : read_write_impl).reset(ptr);
+	(config.read_only ? read_only_impl : read_write_impl).reset(ptr);
 }
 
-void SlateDBFileSystem::InitializeS3(const S3InitializationConfig &config, const CacheInitializationConfig &cache,
-                                     bool read_only) {
+void SlateDBFileSystem::InitializeS3(const S3InitializationConfig &s3_config,
+                                     const DatabaseInitializationConfig &config) {
 	slatedb_s3_config ffi_config {
-	    config.bucket.c_str(),        config.root.c_str(),   config.endpoint.c_str(),
-	    config.region.c_str(),        config.key_id.c_str(), config.secret.c_str(),
-	    config.session_token.c_str(), config.use_ssl,        config.virtual_host_style,
+	    s3_config.bucket.c_str(),        s3_config.root.c_str(),   s3_config.endpoint.c_str(),
+	    s3_config.region.c_str(),        s3_config.key_id.c_str(), s3_config.secret.c_str(),
+	    s3_config.session_token.c_str(), s3_config.use_ssl,        s3_config.virtual_host_style,
 	};
-	auto ffi_cache = ConvertCacheConfig(cache);
-	auto ffi_database = ConvertDatabaseConfig(read_only);
+	auto ffi_cache = ConvertCacheConfig(config.cache);
+	auto ffi_database = ConvertDatabaseConfig(config);
 	slatedb_fs *ptr = nullptr;
 	auto code = slatedb_fs_create_s3(&ffi_config, &ffi_cache, &ffi_database, &ptr);
 	ThrowSlateDBError(code, "initialize S3-backed SlateDB filesystem");
-	(read_only ? read_only_impl : read_write_impl).reset(ptr);
+	(config.read_only ? read_only_impl : read_write_impl).reset(ptr);
 }
 
 SlateDBFileSystem::InitializationConfig SlateDBFileSystem::ReadInitializationConfig(optional_ptr<FileOpener> opener) {
@@ -163,13 +163,16 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 		initialization_config = make_uniq<InitializationConfig>(ReadInitializationConfig(opener));
 	}
 	auto &config = *initialization_config;
+	DatabaseInitializationConfig database_config;
+	database_config.cache = config.cache;
+	database_config.read_only = read_only;
 	if (config.backend == "memory") {
-		InitializeMemory(config.cache, read_only);
+		InitializeMemory(database_config);
 	} else if (config.backend == "local") {
-		InitializeLocal(config.local_root, config.cache, read_only);
+		InitializeLocal(config.local_root, database_config);
 	} else {
 		D_ASSERT(config.backend == "s3");
-		InitializeS3(config.s3, config.cache, read_only);
+		InitializeS3(config.s3, database_config);
 	}
 	return selected_impl.get();
 }

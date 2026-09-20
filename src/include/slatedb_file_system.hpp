@@ -58,9 +58,9 @@ private:
 	};
 
 	void EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> opener);
-	void InitializeMemory(const CacheInitializationConfig &cache, bool read_only);
-	void InitializeLocal(const string &root, const CacheInitializationConfig &cache, bool read_only);
-	void InitializeS3(const S3InitializationConfig &config, const CacheInitializationConfig &cache, bool read_only);
+	void InitializeMemory(const DatabaseInitializationConfig &config);
+	void InitializeLocal(const string &root, const DatabaseInitializationConfig &config);
+	void InitializeS3(const S3InitializationConfig &s3_config, const DatabaseInitializationConfig &config);
 	InitializationConfig ReadInitializationConfig(optional_ptr<FileOpener> opener);
 	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener, bool read_only);
 
