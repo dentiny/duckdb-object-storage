@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use slatedb::config::{DbReaderOptions, Settings};
+use slatedb::config::ObjectStoreCacheOptions;
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use slatedb::db_cache::{DbCache, SplitCache};
 use slatedb_common::metrics::{DefaultMetricsRecorder, MetricValue, Metrics};
@@ -43,27 +43,16 @@ impl Default for CacheConfig {
 }
 
 impl CacheConfig {
-    pub(crate) fn apply_to_settings(&self, settings: &mut Settings) {
-        let Some(path) = &self.persistent_cache_path else {
-            return;
-        };
-        settings.object_store_cache_options.root_folder = Some(path.clone());
-        settings.object_store_cache_options.max_cache_size_bytes =
-            Some(self.persistent_cache_size_bytes);
-        settings.object_store_cache_options.part_size_bytes = self.persistent_cache_part_size_bytes;
-        settings.object_store_cache_options.cache_on_flush = self.persistent_cache_on_flush;
-        settings.object_store_cache_options.cache_on_compaction =
-            self.persistent_cache_on_compaction;
-    }
-
-    pub(crate) fn apply_to_reader_options(&self, options: &mut DbReaderOptions) {
-        let Some(path) = &self.persistent_cache_path else {
-            return;
-        };
-        options.object_store_cache_options.root_folder = Some(path.clone());
-        options.object_store_cache_options.max_cache_size_bytes =
-            Some(self.persistent_cache_size_bytes);
-        options.object_store_cache_options.part_size_bytes = self.persistent_cache_part_size_bytes;
+    pub(crate) fn object_store_cache_options(&self) -> ObjectStoreCacheOptions {
+        let mut options = ObjectStoreCacheOptions::default();
+        if let Some(path) = &self.persistent_cache_path {
+            options.root_folder = Some(path.clone());
+            options.max_cache_size_bytes = Some(self.persistent_cache_size_bytes);
+            options.part_size_bytes = self.persistent_cache_part_size_bytes;
+            options.cache_on_flush = self.persistent_cache_on_flush;
+            options.cache_on_compaction = self.persistent_cache_on_compaction;
+        }
+        options
     }
 
     pub(crate) fn build_db_cache(&self) -> Option<Arc<dyn DbCache>> {

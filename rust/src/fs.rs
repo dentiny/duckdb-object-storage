@@ -94,10 +94,11 @@ impl SlateDbFileSystem {
         let object_store = Arc::new(OpendalStore::new(operator));
         let cache_metrics = CacheMetrics::new();
         let db_cache = cache_config.build_db_cache();
+        let object_store_cache_options = cache_config.object_store_cache_options();
         let client = match access_mode {
             SlateDbAccessMode::ReadWrite => {
                 let mut settings = Settings::default();
-                cache_config.apply_to_settings(&mut settings);
+                settings.object_store_cache_options = object_store_cache_options;
                 let mut builder = Db::builder(database_path, object_store)
                     .with_settings(settings)
                     .with_metrics_recorder(cache_metrics.recorder());
@@ -109,7 +110,7 @@ impl SlateDbFileSystem {
             }
             SlateDbAccessMode::ReadOnly => {
                 let mut options = DbReaderOptions::default();
-                cache_config.apply_to_reader_options(&mut options);
+                options.object_store_cache_options = object_store_cache_options;
                 let mut builder = DbReader::builder(database_path, object_store)
                     .with_reader_mode(DbReaderMode::ManagedCheckpoint)
                     .with_options(options)
