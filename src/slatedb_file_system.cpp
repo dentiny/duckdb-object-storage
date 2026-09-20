@@ -161,12 +161,9 @@ void SlateDBFileSystem::FreezeSettingsSnapshot(optional_ptr<FileOpener> opener, 
 	} else if (config.backend == "s3") {
 		values["duckdb_objfs_root"] = config.s3.root;
 	} else {
-		// The memory backend never reads the root; freeze the raw value so
-		// post-initialization changes are still rejected.
 		values["duckdb_objfs_root"] = GetOptionalSetting(opener, "duckdb_objfs_root");
 	}
 	values["duckdb_objfs_bucket"] = config.backend == "s3" ? config.s3.bucket : "";
-	// Values are stored in canonical Value::ToString() form for the set callback.
 	values["duckdb_objfs_memory_cache_size"] = Value::UBIGINT(config.cache.block_cache_size_bytes).ToString();
 	values["duckdb_objfs_metadata_cache_size"] = Value::UBIGINT(config.cache.metadata_cache_size_bytes).ToString();
 	values["duckdb_objfs_cache_shards"] = Value::UBIGINT(config.cache.cache_shards).ToString();

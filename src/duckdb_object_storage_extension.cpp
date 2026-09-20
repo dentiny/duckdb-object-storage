@@ -58,8 +58,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	instance.GetFileSystem().RegisterSubSystem(std::move(file_system));
 }
 
-#undef SLATEDB_FREEZE_GUARD
-
 void DuckdbObjectStorageExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);
 }
