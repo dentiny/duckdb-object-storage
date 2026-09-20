@@ -1,8 +1,13 @@
 #pragma once
 
 #include "duckdb/common/file_opener.hpp"
+#include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
+
+// Forward declarations
+class ClientContext;
+class Value;
 
 struct S3InitializationConfig {
 	//! S3 bucket that stores SlateDB objects.
@@ -49,9 +54,40 @@ struct DatabaseInitializationConfig {
 	bool read_only = false;
 };
 
+//! Snapshot of the settings the SlateDB filesystem was initialized with, stored
+//! in the DatabaseInstance object cache. Extension-option set callbacks are plain
+//! function pointers, so they locate this snapshot through the object cache to
+//! reject setting changes that would silently not take effect.
+struct FrozenSlateDBSettings : public ObjectCacheEntry {
+	static constexpr const char *CACHE_KEY = "duckdb_objfs_frozen_settings";
+
+	string backend;
+	//! Effective root for the local/s3 backends; empty for the memory backend.
+	string root;
+	//! S3 bucket; empty unless the s3 backend is in use.
+	string bucket;
+	CacheInitializationConfig cache;
+
+	static string ObjectType() {
+		return CACHE_KEY;
+	}
+	string GetObjectType() override {
+		return ObjectType();
+	}
+	//! Never evict: the snapshot must live as long as the database instance.
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx();
+	}
+};
+
 string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name);
 string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name);
 S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener);
 CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener> opener);
+
+//! Throws if the SlateDB filesystem is already initialized and `new_value`
+//! differs from the value the filesystem was initialized with. Registered as
+//! the set callback of every duckdb_objfs_* extension option.
+void CheckFrozenSlateDBSetting(ClientContext &context, const string &name, const Value &new_value);
 
 } // namespace duckdb

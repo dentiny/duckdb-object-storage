@@ -8,7 +8,7 @@ require duckdb_object_storage
 require parquet
 
 statement ok
-SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_data_files_parquet'
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
 
 statement ok
 ATTACH 'duckdb_objfs://data_files_parquet.db' AS object_db

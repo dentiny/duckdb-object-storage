@@ -11,8 +11,10 @@ SELECT * FROM glob('duckdb_objfs://dummy/**');
 SlateDBFileSystem::Glob is not implemented
 
 # The default backend is local; redirect its root into the isolated test directory.
+# Matches the test config's on_init root so the SET is also accepted once the
+# config has already initialized the filesystem.
 statement ok
-SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_local'
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
 
 statement ok
 ATTACH 'duckdb_objfs://integration.db' AS object_db

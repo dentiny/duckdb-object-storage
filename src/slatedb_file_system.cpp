@@ -148,6 +148,27 @@ void SlateDBFileSystem::EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> o
 	buffer_manager.SetTemporaryDirectory(local_directory);
 }
 
+void SlateDBFileSystem::FreezeSettingsSnapshot(optional_ptr<FileOpener> opener, const InitializationConfig &config) {
+	auto database = FileOpener::TryGetDatabase(opener);
+	if (!database) {
+		return;
+	}
+	auto frozen = make_shared_ptr<FrozenSlateDBSettings>();
+	frozen->backend = config.backend;
+	if (config.backend == "local") {
+		frozen->root = config.local_root;
+	} else if (config.backend == "s3") {
+		frozen->root = config.s3.root;
+		frozen->bucket = config.s3.bucket;
+	} else {
+		// The memory backend never reads the root; freeze the raw value so
+		// post-initialization changes are still rejected.
+		frozen->root = GetOptionalSetting(opener, "duckdb_objfs_root");
+	}
+	frozen->cache = config.cache;
+	database->GetObjectCache().Put(FrozenSlateDBSettings::CACHE_KEY, std::move(frozen));
+}
+
 slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> opener, bool read_only) {
 	lock_guard<mutex> guard(initialization_lock);
 	EnsureTemporaryFilesStayLocal(opener);
@@ -161,6 +182,7 @@ slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> op
 
 	if (!initialization_config) {
 		initialization_config = make_uniq<InitializationConfig>(ReadInitializationConfig(opener));
+		FreezeSettingsSnapshot(opener, *initialization_config);
 	}
 	auto &config = *initialization_config;
 	DatabaseInitializationConfig database_config;

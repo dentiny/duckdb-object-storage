@@ -12,7 +12,7 @@ SELECT count(*) FROM duckdb_objfs_cache_stats()
 
 # Enable all cache tiers with small, deterministic capacities.
 statement ok
-SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_cache_backend'
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
 
 statement ok
 SET duckdb_objfs_memory_cache_size = 1048576

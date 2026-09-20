@@ -1,0 +1,46 @@
+# name: test/sql/duckdb_object_storage_frozen_settings.test
+# description: Initialization settings are frozen once the SlateDB filesystem is created
+# group: [sql]
+
+require duckdb_object_storage
+
+# Matches the test config's on_init root, so this SET is accepted both before
+# initialization (standalone runs) and after it (config-driven runs).
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
+
+statement ok
+ATTACH 'duckdb_objfs://frozen_settings.db' AS object_db
+
+# Re-setting the values the filesystem was initialized with is a harmless no-op.
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
+
+statement ok
+SET duckdb_objfs_memory_cache_size = 536870912
+
+# Changing an initialization setting afterwards is rejected instead of being
+# silently ignored.
+statement error
+SET duckdb_objfs_root = '__TEST_DIR__/elsewhere'
+----
+Cannot change setting 'duckdb_objfs_root'
+
+statement error
+SET GLOBAL duckdb_objfs_root = '__TEST_DIR__/elsewhere'
+----
+Cannot change setting 'duckdb_objfs_root'
+
+statement error
+SET duckdb_objfs_backend = 's3'
+----
+Cannot change setting 'duckdb_objfs_backend'
+
+statement error
+SET duckdb_objfs_memory_cache_size = 1024
+----
+Cannot change setting 'duckdb_objfs_memory_cache_size'
+
+# The rejected SET statements did not take effect: the filesystem still works.
+statement ok
+CREATE TABLE object_db.still_works(i INTEGER)
