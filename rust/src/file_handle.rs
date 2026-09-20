@@ -4,10 +4,10 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use slatedb::{Db, WriteBatch};
+use slatedb::{Db, DbReader, WriteBatch};
 
 use crate::chunk_manager::ChunkManager;
-use crate::chunk_store::{ChunkStore, SlateDbChunkStore};
+use crate::chunk_store::{ChunkStore, SlateDbChunkStore, SlateDbReaderChunkStore};
 use crate::error::{Error, Result};
 use crate::file_metadata::FileMetadata;
 use crate::flags::FileOpenFlags;
@@ -58,7 +58,7 @@ pub trait FileHandle: Debug {
 }
 
 pub struct SlateFileHandle {
-    db: Arc<Db>,
+    db: Option<Arc<Db>>,
     file_id: u64,
     position: u64,
     size: u64,
@@ -77,13 +77,41 @@ impl SlateFileHandle {
         flags: FileOpenFlags,
     ) -> Result<Self> {
         let store = Arc::new(SlateDbChunkStore::new(Arc::clone(&db)));
-        Self::with_chunk_store(db, store, file_id, metadata, flags)
+        Self::with_optional_db(Some(db), store, file_id, metadata, flags)
+    }
+
+    pub(crate) fn new_read_only(
+        reader: Arc<DbReader>,
+        file_id: u64,
+        metadata: FileMetadata,
+        flags: FileOpenFlags,
+    ) -> Result<Self> {
+        flags.validate()?;
+        flags.ensure_readable(file_id)?;
+        if flags.write {
+            return Err(Error::read_only_violation(
+                "read-only SlateDB filesystem cannot create a writable file handle",
+            ));
+        }
+        let store = Arc::new(SlateDbReaderChunkStore::new(reader));
+        Self::with_optional_db(None, store, file_id, metadata, flags)
     }
 
     /// Open a handle whose chunks are read through `store`; `db` still carries
     /// the metadata writes. Tests pass a store that fails on demand.
+    #[cfg(test)]
     pub(crate) fn with_chunk_store(
         db: Arc<Db>,
+        store: Arc<dyn ChunkStore>,
+        file_id: u64,
+        metadata: FileMetadata,
+        flags: FileOpenFlags,
+    ) -> Result<Self> {
+        Self::with_optional_db(Some(db), store, file_id, metadata, flags)
+    }
+
+    fn with_optional_db(
+        db: Option<Arc<Db>>,
         store: Arc<dyn ChunkStore>,
         file_id: u64,
         metadata: FileMetadata,
@@ -212,8 +240,14 @@ impl FileHandle for SlateFileHandle {
             self.metadata().encode_to_bytes(),
         );
 
-        self.db.write(batch).await?;
-        self.db.flush().await?;
+        let db = self.db.as_ref().ok_or_else(|| {
+            Error::read_only_violation(format!(
+                "cannot sync file_id {} through a read-only SlateDB client",
+                self.file_id
+            ))
+        })?;
+        db.write(batch).await?;
+        db.flush().await?;
 
         self.chunks.mark_flushed();
         self.metadata_dirty = false;

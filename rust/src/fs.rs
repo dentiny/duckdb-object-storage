@@ -13,7 +13,6 @@ use crate::file_handle::{FileHandle, SlateFileHandle};
 use crate::flags::FileOpenFlags;
 use crate::io_metrics::IoMetrics;
 use crate::opendal_io_metrics_layer::IoMetricsLayer;
-use crate::read_only_file_handle::SlateReadOnlyFileHandle;
 
 /// URL scheme claimed by this filesystem in DuckDB's virtual filesystem.
 pub const PREFIX: &str = "duckdb_objfs:";
@@ -237,7 +236,7 @@ impl SlateDbFileSystem {
                 let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&reader))
                     .open_file(path)
                     .await?;
-                Ok(Box::new(SlateReadOnlyFileHandle::new(
+                Ok(Box::new(SlateFileHandle::new_read_only(
                     reader, file_id, metadata, flags,
                 )?))
             }
