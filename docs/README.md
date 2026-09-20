@@ -73,6 +73,15 @@ CREATE OR REPLACE SECRET duckdb_objfs_s3 (
 Credentials, session tokens, regions, endpoints, and URL style come from the
 scope-matching S3 secret. They are not stored in extension settings.
 
+A secret is optional: if no S3 secret matches the bucket, requests are sent
+unsigned (anonymous access), which suits public buckets or services that
+authenticate at the network level. A region is still required — for anonymous
+access, create a secret that carries only the region, e.g.
+`CREATE SECRET (TYPE S3, REGION 'us-east-1', SCOPE 's3://my-bucket')`. A
+secret created with `PROVIDER credential_chain` works as well — DuckDB
+resolves the chain (environment, config files, instance metadata) when the
+secret is created and materializes the credentials the extension reads.
+
 ## Cache configuration
 
 The extension enables SlateDB's Foyer in-memory cache by default. Data blocks
