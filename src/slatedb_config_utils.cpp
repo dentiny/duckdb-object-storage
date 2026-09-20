@@ -100,72 +100,35 @@ void CheckFrozenSlateDBSetting(ClientContext &context, const string &name, const
 		// The filesystem has not been initialized yet; the setting still takes effect.
 		return;
 	}
-
-	string frozen_display;
-	string new_display = new_value.ToString();
-	bool changed = false;
-
-	if (name == "duckdb_objfs_backend") {
-		// Mirrors the normalization in ReadInitializationConfig.
-		auto effective = StringUtil::Lower(new_value.GetValue<string>());
-		if (effective.empty()) {
-			effective = "local";
-		}
-		new_display = effective;
-		frozen_display = frozen->backend;
-		changed = effective != frozen->backend;
-	} else if (name == "duckdb_objfs_root") {
-		auto effective = new_value.GetValue<string>();
-		if (frozen->backend == "memory") {
-			// The memory backend never reads the root; compare the raw value.
-			frozen_display = frozen->root;
-			changed = effective != frozen->root;
-		} else {
-			if (effective.empty()) {
-				effective = frozen->backend == "s3" ? "duckdb_objfs" : ".duckdb_objfs";
-			}
-			new_display = effective;
-			frozen_display = frozen->root;
-			changed = effective != frozen->root;
-		}
-	} else if (name == "duckdb_objfs_bucket") {
-		// Empty unless the s3 backend is in use.
-		frozen_display = frozen->bucket;
-		changed = new_value.GetValue<string>() != frozen->bucket;
-	} else if (name == "duckdb_objfs_persistent_cache_path") {
-		frozen_display = frozen->cache.persistent_cache_path;
-		changed = new_value.GetValue<string>() != frozen->cache.persistent_cache_path;
-	} else if (name == "duckdb_objfs_memory_cache_size") {
-		changed = new_value.GetValue<uint64_t>() != frozen->cache.block_cache_size_bytes;
-		frozen_display = std::to_string(frozen->cache.block_cache_size_bytes);
-	} else if (name == "duckdb_objfs_metadata_cache_size") {
-		changed = new_value.GetValue<uint64_t>() != frozen->cache.metadata_cache_size_bytes;
-		frozen_display = std::to_string(frozen->cache.metadata_cache_size_bytes);
-	} else if (name == "duckdb_objfs_cache_shards") {
-		changed = new_value.GetValue<uint64_t>() != frozen->cache.cache_shards;
-		frozen_display = std::to_string(frozen->cache.cache_shards);
-	} else if (name == "duckdb_objfs_persistent_cache_size") {
-		changed = new_value.GetValue<uint64_t>() != frozen->cache.persistent_cache_size_bytes;
-		frozen_display = std::to_string(frozen->cache.persistent_cache_size_bytes);
-	} else if (name == "duckdb_objfs_persistent_cache_part_size") {
-		changed = new_value.GetValue<uint64_t>() != frozen->cache.persistent_cache_part_size_bytes;
-		frozen_display = std::to_string(frozen->cache.persistent_cache_part_size_bytes);
-	} else if (name == "duckdb_objfs_persistent_cache_on_flush") {
-		changed = new_value.GetValue<bool>() != frozen->cache.persistent_cache_on_flush;
-		frozen_display = frozen->cache.persistent_cache_on_flush ? "true" : "false";
-	} else if (name == "duckdb_objfs_persistent_cache_on_compaction") {
-		changed = new_value.GetValue<bool>() != frozen->cache.persistent_cache_on_compaction;
-		frozen_display = frozen->cache.persistent_cache_on_compaction ? "true" : "false";
-	} else {
+	auto entry = frozen->values.find(name);
+	if (entry == frozen->values.end()) {
 		// Not an initialization setting.
 		return;
 	}
 
-	if (changed) {
+	auto raw_string = new_value.IsNull() ? "" : new_value.GetValue<string>();
+	string effective;
+	if (name == "duckdb_objfs_backend") {
+		effective = StringUtil::Lower(raw_string);
+		if (effective.empty()) {
+			effective = "local";
+		}
+	} else if (name == "duckdb_objfs_root") {
+		effective = raw_string;
+		auto &backend = frozen->values.at("duckdb_objfs_backend");
+		if (backend != "memory" && effective.empty()) {
+			effective = backend == "s3" ? "duckdb_objfs" : ".duckdb_objfs";
+		}
+	} else {
+		effective = new_value.IsNull() ? "" : new_value.ToString();
+	}
+
+	// slatedb and foyer doesn't allow runtime configuration changes, so directly throw an error.
+	if (effective != entry->second) {
 		throw InvalidConfigurationException(
 		    "Cannot change setting '%s' from '%s' to '%s': the SlateDB filesystem is already initialized. "
 		    "Restart the database to use a different value.",
-		    name, frozen_display, new_display);
+		    name, entry->second, effective);
 	}
 }
 

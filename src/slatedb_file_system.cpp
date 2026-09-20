@@ -154,18 +154,30 @@ void SlateDBFileSystem::FreezeSettingsSnapshot(optional_ptr<FileOpener> opener, 
 		return;
 	}
 	auto frozen = make_shared_ptr<FrozenSlateDBSettings>();
-	frozen->backend = config.backend;
+	auto &values = frozen->values;
+	values["duckdb_objfs_backend"] = config.backend;
 	if (config.backend == "local") {
-		frozen->root = config.local_root;
+		values["duckdb_objfs_root"] = config.local_root;
 	} else if (config.backend == "s3") {
-		frozen->root = config.s3.root;
-		frozen->bucket = config.s3.bucket;
+		values["duckdb_objfs_root"] = config.s3.root;
 	} else {
 		// The memory backend never reads the root; freeze the raw value so
 		// post-initialization changes are still rejected.
-		frozen->root = GetOptionalSetting(opener, "duckdb_objfs_root");
+		values["duckdb_objfs_root"] = GetOptionalSetting(opener, "duckdb_objfs_root");
 	}
-	frozen->cache = config.cache;
+	values["duckdb_objfs_bucket"] = config.backend == "s3" ? config.s3.bucket : "";
+	// Values are stored in canonical Value::ToString() form for the set callback.
+	values["duckdb_objfs_memory_cache_size"] = Value::UBIGINT(config.cache.block_cache_size_bytes).ToString();
+	values["duckdb_objfs_metadata_cache_size"] = Value::UBIGINT(config.cache.metadata_cache_size_bytes).ToString();
+	values["duckdb_objfs_cache_shards"] = Value::UBIGINT(config.cache.cache_shards).ToString();
+	values["duckdb_objfs_persistent_cache_path"] = config.cache.persistent_cache_path;
+	values["duckdb_objfs_persistent_cache_size"] = Value::UBIGINT(config.cache.persistent_cache_size_bytes).ToString();
+	values["duckdb_objfs_persistent_cache_part_size"] =
+	    Value::UBIGINT(config.cache.persistent_cache_part_size_bytes).ToString();
+	values["duckdb_objfs_persistent_cache_on_flush"] =
+	    Value::BOOLEAN(config.cache.persistent_cache_on_flush).ToString();
+	values["duckdb_objfs_persistent_cache_on_compaction"] =
+	    Value::BOOLEAN(config.cache.persistent_cache_on_compaction).ToString();
 	database->GetObjectCache().Put(FrozenSlateDBSettings::CACHE_KEY, std::move(frozen));
 }
 

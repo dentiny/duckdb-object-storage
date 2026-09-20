@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
@@ -55,16 +56,13 @@ struct DatabaseInitializationConfig {
 };
 
 // Snapshot of the settings the SlateDB filesystem was initialized with, runtime configs are rejected if they differ
-// from the snapshot.
+// from the snapshot. Values are stored in their normalized Value::ToString() form so the set callback can compare
+// with a single map lookup.
 struct FrozenSlateDBSettings : public ObjectCacheEntry {
 	static constexpr const char *CACHE_KEY = "duckdb_objfs_frozen_settings";
 
-	string backend;
-	// Effective root for the local/s3 backends; empty for the memory backend.
-	string root;
-	// S3 bucket; empty unless the s3 backend is in use.
-	string bucket;
-	CacheInitializationConfig cache;
+	//! Normalized effective value per initialization setting name.
+	case_insensitive_map_t<string> values;
 
 	static string ObjectType() {
 		return CACHE_KEY;
