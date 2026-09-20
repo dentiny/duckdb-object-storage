@@ -28,4 +28,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
 
 [dev-dependencies]
+hyper-util = { version = "0.1", features = ["server-auto", "http1", "http2", "tokio"] }
+s3s = "0.16"
+s3s-fs = "0.16"
 tempfile = "3"
+tokio = { version = "1", features = ["net", "time"] }
