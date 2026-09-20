@@ -9,9 +9,6 @@
 
 namespace duckdb {
 
-// Extension-option set callbacks are plain function pointers, so these
-// capture-less lambdas reject post-initialization setting changes through the
-// frozen settings snapshot stored in the database's object cache.
 #define SLATEDB_FREEZE_GUARD(SETTING_NAME)                                                                             \
 	[](ClientContext &context, SetScope, Value &value) {                                                               \
 		CheckFrozenSlateDBSetting(context, SETTING_NAME, value);                                                       \
@@ -20,12 +17,16 @@ namespace duckdb {
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &instance = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(instance);
+
+	// Storage backend configuration.
 	config.AddExtensionOption("duckdb_objfs_backend", "Storage backend: s3, local, or memory", LogicalType::VARCHAR,
 	                          Value("local"), SLATEDB_FREEZE_GUARD("duckdb_objfs_backend"));
 	config.AddExtensionOption("duckdb_objfs_bucket", "S3 bucket used by the DuckDB object filesystem",
 	                          LogicalType::VARCHAR, Value(), SLATEDB_FREEZE_GUARD("duckdb_objfs_bucket"));
 	config.AddExtensionOption("duckdb_objfs_root", "Local directory or S3 object prefix used by the filesystem",
 	                          LogicalType::VARCHAR, Value(), SLATEDB_FREEZE_GUARD("duckdb_objfs_root"));
+
+	// Cache configuration.
 	config.AddExtensionOption("duckdb_objfs_memory_cache_size", "Foyer data-block cache capacity in bytes",
 	                          LogicalType::UBIGINT, Value::UBIGINT(512ULL * 1024 * 1024),
 	                          SLATEDB_FREEZE_GUARD("duckdb_objfs_memory_cache_size"));
@@ -50,6 +51,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("duckdb_objfs_persistent_cache_on_compaction",
 	                          "Populate the persistent cache from compaction output", LogicalType::BOOLEAN,
 	                          Value(false), SLATEDB_FREEZE_GUARD("duckdb_objfs_persistent_cache_on_compaction"));
+
 	auto file_system = make_uniq<SlateDBFileSystem>();
 	loader.RegisterFunction(GetSlateDBCacheStatsFunction(*file_system));
 	loader.RegisterFunction(GetSlateDBIoStatsFunction(*file_system));

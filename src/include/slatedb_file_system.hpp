@@ -62,8 +62,6 @@ private:
 	void InitializeLocal(const string &root, const DatabaseInitializationConfig &config);
 	void InitializeS3(const S3InitializationConfig &s3_config, const DatabaseInitializationConfig &config);
 	InitializationConfig ReadInitializationConfig(optional_ptr<FileOpener> opener);
-	//! Publish a snapshot of the frozen settings so extension-option set
-	//! callbacks can reject changes that would silently not take effect.
 	void FreezeSettingsSnapshot(optional_ptr<FileOpener> opener, const InitializationConfig &config);
 	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener, bool read_only);
 
