@@ -57,8 +57,33 @@ pub trait FileHandle: Debug {
     fn flags(&self) -> FileOpenFlags;
 }
 
+pub(crate) enum SlateFileClient {
+    ReadWrite(Arc<Db>),
+    ReadOnly(Arc<DbReader>),
+}
+
+impl SlateFileClient {
+    fn chunk_store(&self) -> Arc<dyn ChunkStore> {
+        match self {
+            SlateFileClient::ReadWrite(db) => Arc::new(SlateDbChunkStore::new(Arc::clone(db))),
+            SlateFileClient::ReadOnly(reader) => {
+                Arc::new(SlateDbReaderChunkStore::new(Arc::clone(reader)))
+            }
+        }
+    }
+
+    fn writer(&self, file_id: u64) -> Result<&Db> {
+        match self {
+            SlateFileClient::ReadWrite(db) => Ok(db),
+            SlateFileClient::ReadOnly(_) => Err(Error::read_only_violation(format!(
+                "cannot sync file_id {file_id} through a read-only SlateDB client"
+            ))),
+        }
+    }
+}
+
 pub struct SlateFileHandle {
-    db: Option<Arc<Db>>,
+    client: SlateFileClient,
     file_id: u64,
     position: u64,
     size: u64,
@@ -70,31 +95,14 @@ pub struct SlateFileHandle {
 
 impl SlateFileHandle {
     /// Open a handle over an existing metadata record.
-    pub fn new(
-        db: Arc<Db>,
+    pub(crate) fn new(
+        client: SlateFileClient,
         file_id: u64,
         metadata: FileMetadata,
         flags: FileOpenFlags,
     ) -> Result<Self> {
-        let store = Arc::new(SlateDbChunkStore::new(Arc::clone(&db)));
-        Self::with_optional_db(Some(db), store, file_id, metadata, flags)
-    }
-
-    pub(crate) fn new_read_only(
-        reader: Arc<DbReader>,
-        file_id: u64,
-        metadata: FileMetadata,
-        flags: FileOpenFlags,
-    ) -> Result<Self> {
-        flags.validate()?;
-        flags.ensure_readable(file_id)?;
-        if flags.write {
-            return Err(Error::read_only_violation(
-                "read-only SlateDB filesystem cannot create a writable file handle",
-            ));
-        }
-        let store = Arc::new(SlateDbReaderChunkStore::new(reader));
-        Self::with_optional_db(None, store, file_id, metadata, flags)
+        let store = client.chunk_store();
+        Self::with_chunk_store_internal(client, store, file_id, metadata, flags)
     }
 
     /// Open a handle whose chunks are read through `store`; `db` still carries
@@ -107,22 +115,36 @@ impl SlateFileHandle {
         metadata: FileMetadata,
         flags: FileOpenFlags,
     ) -> Result<Self> {
-        Self::with_optional_db(Some(db), store, file_id, metadata, flags)
+        Self::with_chunk_store_internal(
+            SlateFileClient::ReadWrite(db),
+            store,
+            file_id,
+            metadata,
+            flags,
+        )
     }
 
-    fn with_optional_db(
-        db: Option<Arc<Db>>,
+    fn with_chunk_store_internal(
+        client: SlateFileClient,
         store: Arc<dyn ChunkStore>,
         file_id: u64,
         metadata: FileMetadata,
         flags: FileOpenFlags,
     ) -> Result<Self> {
         flags.validate()?;
+        if matches!(&client, SlateFileClient::ReadOnly(_)) {
+            flags.ensure_readable(file_id)?;
+            if flags.write {
+                return Err(Error::read_only_violation(
+                    "read-only SlateDB filesystem cannot create a writable file handle",
+                ));
+            }
+        }
         let chunk_size = metadata.validated_chunk_size(file_id)?;
         let position = if flags.append { metadata.size } else { 0 };
 
         Ok(Self {
-            db,
+            client,
             file_id,
             position,
             size: metadata.size,
@@ -240,12 +262,7 @@ impl FileHandle for SlateFileHandle {
             self.metadata().encode_to_bytes(),
         );
 
-        let db = self.db.as_ref().ok_or_else(|| {
-            Error::read_only_violation(format!(
-                "cannot sync file_id {} through a read-only SlateDB client",
-                self.file_id
-            ))
-        })?;
+        let db = self.client.writer(self.file_id)?;
         db.write(batch).await?;
         db.flush().await?;
 
@@ -344,7 +361,13 @@ mod tests {
         }
 
         fn handle(&self, file_id: u64, flags: FileOpenFlags) -> SlateFileHandle {
-            SlateFileHandle::new(Arc::clone(&self.db), file_id, new_metadata(), flags).unwrap()
+            SlateFileHandle::new(
+                SlateFileClient::ReadWrite(Arc::clone(&self.db)),
+                file_id,
+                new_metadata(),
+                flags,
+            )
+            .unwrap()
         }
 
         /// A handle whose chunk reads can be made to fail.
@@ -373,7 +396,13 @@ mod tests {
                 .unwrap()
                 .expect("metadata");
             let metadata = FileMetadata::decode_from_bytes(&bytes).unwrap();
-            SlateFileHandle::new(Arc::clone(&self.db), file_id, metadata, flags).unwrap()
+            SlateFileHandle::new(
+                SlateFileClient::ReadWrite(Arc::clone(&self.db)),
+                file_id,
+                metadata,
+                flags,
+            )
+            .unwrap()
         }
 
         async fn close(self) {

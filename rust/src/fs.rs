@@ -9,7 +9,7 @@ use slatedb::{Db, DbReader, DbReaderMode, ErrorKind as SlateDbErrorKind};
 use crate::cache::{CacheConfig, CacheMetrics};
 use crate::database_metadata::DatabaseMetadata;
 use crate::error::{Error, Result};
-use crate::file_handle::{FileHandle, SlateFileHandle};
+use crate::file_handle::{FileHandle, SlateFileClient, SlateFileHandle};
 use crate::flags::FileOpenFlags;
 use crate::io_metrics::IoMetrics;
 use crate::opendal_io_metrics_layer::IoMetricsLayer;
@@ -224,7 +224,10 @@ impl SlateDbFileSystem {
                     .prepare_file_for_open(path, flags.create, flags.truncate_existing)
                     .await?;
                 Ok(Box::new(SlateFileHandle::new(
-                    db, file_id, metadata, flags,
+                    SlateFileClient::ReadWrite(db),
+                    file_id,
+                    metadata,
+                    flags,
                 )?))
             }
             SlateDbClient::ReadOnly(reader) => {
@@ -236,8 +239,11 @@ impl SlateDbFileSystem {
                 let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&reader))
                     .open_file(path)
                     .await?;
-                Ok(Box::new(SlateFileHandle::new_read_only(
-                    reader, file_id, metadata, flags,
+                Ok(Box::new(SlateFileHandle::new(
+                    SlateFileClient::ReadOnly(reader),
+                    file_id,
+                    metadata,
+                    flags,
                 )?))
             }
         }
