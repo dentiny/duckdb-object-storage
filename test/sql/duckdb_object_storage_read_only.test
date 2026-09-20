@@ -1,0 +1,114 @@
+# name: test/sql/duckdb_object_storage_read_only.test
+# description: Verify a SlateDB reader and writer can coexist across DuckDB connections
+# group: [sql]
+
+require duckdb_object_storage
+
+load __TEST_DIR__/duckdb_objfs_read_only_runner.db
+
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_read_only_backend'
+
+# Seed two logical databases in the shared SlateDB namespace.
+statement ok
+ATTACH 'duckdb_objfs://reader.db' AS reader_seed
+
+statement ok
+CREATE TABLE reader_seed.items(i INTEGER)
+
+statement ok
+INSERT INTO reader_seed.items VALUES (10)
+
+statement ok
+CHECKPOINT reader_seed
+
+statement ok
+DETACH reader_seed
+
+statement ok
+ATTACH 'duckdb_objfs://writer.db' AS writer_seed
+
+statement ok
+CREATE TABLE writer_seed.items(i INTEGER)
+
+statement ok
+INSERT INTO writer_seed.items VALUES (1)
+
+statement ok
+CHECKPOINT writer_seed
+
+statement ok
+DETACH writer_seed
+
+# Drop the original SlateDB writer and reconstruct the extension filesystem.
+restart
+
+statement ok reader
+SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_read_only_backend'
+
+statement ok reader
+ATTACH 'duckdb_objfs://reader.db' AS reader_db (READ_ONLY)
+
+statement ok reader
+BEGIN TRANSACTION
+
+query I reader
+SELECT sum(i) FROM reader_db.items
+----
+10
+
+# A second DuckDB connection can read from the same read-only attachment while
+# the first reader connection remains active.
+statement ok reader_two
+BEGIN TRANSACTION
+
+query I reader_two
+SELECT sum(i) FROM reader_db.items
+----
+10
+
+statement ok writer
+SET duckdb_objfs_root = '__TEST_DIR__/duckdb_objfs_read_only_backend'
+
+statement ok writer
+ATTACH 'duckdb_objfs://writer.db' AS writer_db
+
+statement ok writer
+INSERT INTO writer_db.items VALUES (2)
+
+statement ok writer
+CHECKPOINT writer_db
+
+query I writer
+SELECT sum(i) FROM writer_db.items
+----
+3
+
+# The reader remains usable after the writer starts, and another writer sync
+# proves that opening the reader did not fence the SlateDB writer.
+query I reader
+SELECT sum(i) FROM reader_db.items
+----
+10
+
+query I reader_two
+SELECT sum(i) FROM reader_db.items
+----
+10
+
+statement ok reader
+COMMIT
+
+statement ok reader_two
+COMMIT
+
+statement ok writer
+INSERT INTO writer_db.items VALUES (3)
+
+statement ok writer
+CHECKPOINT writer_db
+
+query I writer
+SELECT sum(i) FROM writer_db.items
+----
+6

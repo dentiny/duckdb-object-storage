@@ -9,7 +9,6 @@ use slatedb::WriteBatch;
 
 use crate::chunk_store::ChunkStore;
 use crate::error::{Error, Result};
-use crate::error_struct::{ErrorStatus, ErrorStruct};
 use crate::keys;
 
 enum PendingChunk {
@@ -320,31 +319,16 @@ fn coalesce_chunk_indices(chunk_indices: &[u64]) -> Vec<RangeInclusive<u64>> {
 }
 
 fn parse_chunk_idx(key: &[u8]) -> Result<u64> {
-    let key = std::str::from_utf8(key).map_err(|src| {
-        Error::MetadataDecode(
-            ErrorStruct::new(
-                "chunk key is not valid utf-8".to_string(),
-                ErrorStatus::Permanent,
-            )
-            .with_source(src),
-        )
-    })?;
+    let key = std::str::from_utf8(key)
+        .map_err(|src| Error::metadata_decode_with_source("chunk key is not valid utf-8", src))?;
 
-    let chunk_idx = key.rsplit('/').next().ok_or_else(|| {
-        Error::MetadataDecode(ErrorStruct::new(
-            format!("invalid chunk key: {key}"),
-            ErrorStatus::Permanent,
-        ))
-    })?;
+    let chunk_idx = key
+        .rsplit('/')
+        .next()
+        .ok_or_else(|| Error::metadata_decode(format!("invalid chunk key: {key}")))?;
 
     u64::from_str_radix(chunk_idx, 16).map_err(|src| {
-        Error::MetadataDecode(
-            ErrorStruct::new(
-                format!("invalid chunk index in key: {key}"),
-                ErrorStatus::Permanent,
-            )
-            .with_source(src),
-        )
+        Error::metadata_decode_with_source(format!("invalid chunk index in key: {key}"), src)
     })
 }
 

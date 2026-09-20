@@ -44,6 +44,11 @@ struct CacheInitializationConfig {
 	bool persistent_cache_on_compaction = false;
 };
 
+struct DatabaseInitializationConfig {
+	CacheInitializationConfig cache;
+	bool read_only = false;
+};
+
 string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name);
 string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name);
 S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener);
