@@ -3357,6 +3357,7 @@ dependencies = [
  "async-trait",
  "futures",
  "hyper-util",
+ "object_store",
  "object_store_opendal",
  "opendal",
  "prost",

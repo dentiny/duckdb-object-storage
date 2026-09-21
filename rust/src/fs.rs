@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use object_store_opendal::OpendalStore;
 use opendal::services::{Fs, Memory, S3};
 use opendal::Operator;
 use slatedb::config::{DbReaderOptions, Settings};
@@ -13,6 +12,7 @@ use crate::file_handle::{FileHandle, SlateFileClient, SlateFileHandle};
 use crate::flags::FileOpenFlags;
 use crate::io_metrics::IoMetrics;
 use crate::opendal_io_metrics_layer::IoMetricsLayer;
+use crate::slatedb_object_store::SlateDbObjectStore;
 
 /// URL scheme claimed by this filesystem in DuckDB's virtual filesystem.
 pub const PREFIX: &str = "duckdb_objfs:";
@@ -86,14 +86,16 @@ impl SlateDbFileSystem {
 
         let io_metrics = Arc::new(IoMetrics::default());
         let operator = operator.layer(IoMetricsLayer::new(Arc::clone(&io_metrics)));
-        let object_store = Arc::new(OpendalStore::new(operator));
+        let object_store = Arc::new(SlateDbObjectStore::new(operator));
         let cache_metrics = CacheMetrics::new();
         let db_cache = cache_config.build_db_cache();
         let object_store_cache_options = cache_config.object_store_cache_options();
         let client = match access_mode {
             SlateDbAccessMode::ReadWrite => {
-                let mut settings = Settings::default();
-                settings.object_store_cache_options = object_store_cache_options;
+                let settings = Settings {
+                    object_store_cache_options,
+                    ..Settings::default()
+                };
                 let mut builder = Db::builder(database_path, object_store)
                     .with_settings(settings)
                     .with_metrics_recorder(cache_metrics.recorder());
@@ -104,8 +106,10 @@ impl SlateDbFileSystem {
                 SlateDbClient::ReadWrite(Arc::new(builder.build().await?))
             }
             SlateDbAccessMode::ReadOnly => {
-                let mut options = DbReaderOptions::default();
-                options.object_store_cache_options = object_store_cache_options;
+                let options = DbReaderOptions {
+                    object_store_cache_options,
+                    ..DbReaderOptions::default()
+                };
                 let mut builder = DbReader::builder(database_path, object_store)
                     .with_reader_mode(DbReaderMode::ManagedCheckpoint)
                     .with_options(options)

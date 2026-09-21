@@ -19,6 +19,7 @@ protoc-bin-vendored = "3.2"
 anyhow = "1"
 async-trait = "0.1"
 futures = "0.3"
+object_store = "0.14"
 object_store_opendal = { version = "=0.60.1", features = ["services-s3"] }
 opendal = { version = "=0.59.2", default-features = false, features = ["executors-tokio", "http-transport-reqwest", "services-fs", "services-memory", "services-s3"] }
 prost = "0.14"
