@@ -982,6 +982,7 @@ def metadata():
     ).stdout.strip().split(",")
     if not version or version[0] != "v1.5.5":
         raise RuntimeError(f"expected DuckDB v1.5.5, found {version[0] if version else 'unknown'}")
+    # macOS only: system_profiler supplies the host hardware metadata.
     hardware = command(["system_profiler", "SPHardwareDataType"], check=False).stdout
     details = {}
     for line in hardware.splitlines():
@@ -1006,7 +1007,8 @@ def main():
     parser = argparse.ArgumentParser(description="Run native and ObjFS TPC-H benchmarks")
     parser.add_argument("--render-results", type=Path, help="render an existing results.json without benchmarking")
     parser.add_argument("--report", type=Path, help="HTML report path")
-    parser.add_argument("--smoke", action="store_true", help="run SF0.01 Q6 once instead of the full suite")
+    parser.add_argument("--smoke", action="store_true", help="run SF0.01 Q6 instead of the full suite")
+    parser.add_argument("--runs", type=int, help="measured runs per query (default: 3; smoke: 1)")
     parser.add_argument("--scale-factor", type=int, choices=(1, 10), help="TPC-H scale factor (default: 10)")
     parser.add_argument("--remote", action="store_true", help="run S3 HTTPFS versus ObjFS instead of local cases")
     parser.add_argument("--s3-bucket", help="S3 bucket used by --remote")
@@ -1042,6 +1044,8 @@ def main():
         parser.error("--seed-run and --reuse-s3-prefix are mutually exclusive")
     if args.smoke and args.scale_factor:
         parser.error("--scale-factor cannot be used with --smoke")
+    if args.runs is not None and args.runs < 1:
+        parser.error("--runs must be at least 1")
     seed_run = args.seed_run.resolve() if args.seed_run else None
     if seed_run and not ((seed_run / "native.duckdb").is_file() and (seed_run / "objfs-local").is_dir()):
         parser.error("--seed-run must contain native.duckdb and objfs-local")
@@ -1051,13 +1055,14 @@ def main():
         install = duckdb("INSTALL httpfs;")
         if install.returncode != 0:
             parser.error(install.stderr.strip() or "failed to install HTTPFS")
+    runs = args.runs if args.runs is not None else (1 if args.smoke else 3)
     if args.smoke:
-        scale_factor, queries, warmups, runs = 0.01, [6], 0 if args.remote else 1, 1
+        scale_factor, queries, warmups = 0.01, [6], 0 if args.remote else 1
         orders, lineitem = 15000, 60175
     else:
         scale_factor = args.scale_factor or 10
         queries = list(range(1, 23))
-        warmups, runs = (0, 3) if args.remote else (1, 3)
+        warmups = 0 if args.remote else 1
         orders, lineitem = {
             1: (1500000, 6001215),
             10: (15000000, 59986052),

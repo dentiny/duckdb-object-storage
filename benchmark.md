@@ -1,7 +1,8 @@
 # Benchmarks
 
 `scripts/run_benchmarks.py` compares native DuckDB with ObjFS using TPC-H.
-It builds the release binary automatically. Run commands from the repository
+It currently supports macOS only (`system_profiler` is used for host metadata)
+and builds the release binary automatically. Run commands from the repository
 root.
 
 ## Initial results
@@ -11,9 +12,9 @@ Preliminary results from commit `21bae82` with DuckDB `v1.5.5` on an Apple M4
 
 ### Local: memory
 
-TPC-H SF10 with one warm-up and five measured executions per query. Bars show
-medians, whiskers show one sample standard deviation, and labels show the
-ObjFS/native median ratio.
+These SF10 results used one warm-up and five measured executions per query;
+use `--runs 5` to repeat that count. Bars show medians, whiskers show
+one sample standard deviation, and labels show the ObjFS/native median ratio.
 
 ![In-memory TPC-H query latency](docs/benchmark-results/local-memory.png)
 
@@ -44,7 +45,8 @@ ObjFS/native median ratio.
 
 ### Local: filesystem
 
-TPC-H SF10 with one warm-up and five measured executions per query.
+These SF10 results used one warm-up and five measured executions per query;
+use `--runs 5` to repeat that count.
 
 ![Local-filesystem TPC-H query latency](docs/benchmark-results/local-filesystem.png)
 
@@ -115,6 +117,8 @@ Run SF0.01 Q6 once to verify the build and report generation:
 ```sh
 python3 scripts/run_benchmarks.py --smoke
 ```
+
+Use `--runs N` to set measured executions per query (default: 3; smoke: 1).
 
 ## Local benchmark
 
