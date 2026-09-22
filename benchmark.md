@@ -5,10 +5,11 @@ It currently supports macOS only (`system_profiler` is used for host metadata)
 and builds the release binary automatically. Run commands from the repository
 root.
 
-## Initial results
+## Results
 
-Preliminary results from commit `21bae82` with DuckDB `v1.5.5` on an Apple M4
-(10 cores, 16 GB memory, default 10 threads). Values below 1.00× favor ObjFS.
+Results with DuckDB `v1.5.5` on an Apple M4 (10 cores, 16 GB memory,
+default 10 threads). Local SF10 used commit `21bae82`; remote SF1 used
+`7d4c6c9`. Values below 1.00× favor ObjFS.
 
 ### Local: memory
 
@@ -79,34 +80,36 @@ use `--runs 5` to repeat that count.
 
 TPC-H SF1 with three cold executions in independent processes. Native DuckDB
 uses HTTPFS; ObjFS uses memory caches and a new empty persistent-cache directory
-for every process.
+for every process. Bars show medians, whiskers show one sample standard
+deviation, and labels show the ObjFS/native median ratio. The geometric-mean
+query ratio is 2.60×.
 
 ![S3 TPC-H query latency](docs/benchmark-results/remote-s3.png)
 
 | Query | Native median ± SD | ObjFS median ± SD | ObjFS/native |
 | --- | ---: | ---: | ---: |
-| Q01 | 7.962 ± 0.308 s | 22.590 ± 1.393 s | 2.84× |
-| Q02 | 1.183 ± 0.102 s | 4.194 ± 0.554 s | 3.54× |
-| Q03 | 9.483 ± 1.184 s | 39.910 ± 1.703 s | 4.21× |
-| Q04 | 6.918 ± 1.088 s | 33.517 ± 2.184 s | 4.84× |
-| Q05 | 9.698 ± 1.887 s | 29.081 ± 1.718 s | 3.00× |
-| Q06 | 5.947 ± 0.906 s | 20.807 ± 0.266 s | 3.50× |
-| Q07 | 7.420 ± 2.043 s | 36.234 ± 1.473 s | 4.88× |
-| Q08 | 9.111 ± 0.667 s | 33.001 ± 4.906 s | 3.62× |
-| Q09 | 10.573 ± 0.820 s | 32.371 ± 1.307 s | 3.06× |
-| Q10 | 9.648 ± 0.569 s | 28.495 ± 2.130 s | 2.95× |
-| Q11 | 884.3 ± 97.9 ms | 4.934 ± 0.340 s | 5.58× |
-| Q12 | 7.603 ± 1.476 s | 32.421 ± 1.708 s | 4.26× |
-| Q13 | 5.517 ± 1.754 s | 10.416 ± 0.299 s | 1.89× |
-| Q14 | 10.498 ± 2.655 s | 26.509 ± 1.667 s | 2.53× |
-| Q15 | 8.269 ± 1.542 s | 24.037 ± 0.590 s | 2.91× |
-| Q16 | 860.2 ± 46.8 ms | 4.791 ± 0.788 s | 5.57× |
-| Q17 | 8.152 ± 0.951 s | 23.004 ± 1.132 s | 2.82× |
-| Q18 | 4.405 ± 0.618 s | 30.919 ± 8.461 s | 7.02× |
-| Q19 | 11.007 ± 0.275 s | 27.457 ± 1.721 s | 2.49× |
-| Q20 | 7.097 ± 0.123 s | 29.282 ± 4.256 s | 4.13× |
-| Q21 | 6.182 ± 0.836 s | 32.030 ± 1.904 s | 5.18× |
-| Q22 | 1.155 ± 0.049 s | 4.302 ± 0.400 s | 3.72× |
+| Q01 | 6.123 ± 0.388 s | 10.218 ± 0.286 s | 1.67× |
+| Q02 | 763.2 ± 58.0 ms | 2.981 ± 0.047 s | 3.91× |
+| Q03 | 5.587 ± 0.158 s | 17.162 ± 1.392 s | 3.07× |
+| Q04 | 4.188 ± 0.117 s | 16.448 ± 1.650 s | 3.93× |
+| Q05 | 5.653 ± 0.352 s | 13.205 ± 0.070 s | 2.34× |
+| Q06 | 4.584 ± 0.091 s | 8.683 ± 0.056 s | 1.89× |
+| Q07 | 6.461 ± 0.091 s | 15.289 ± 0.225 s | 2.37× |
+| Q08 | 7.336 ± 0.184 s | 13.572 ± 0.060 s | 1.85× |
+| Q09 | 8.528 ± 0.178 s | 16.717 ± 0.147 s | 1.96× |
+| Q10 | 7.426 ± 0.039 s | 14.688 ± 0.080 s | 1.98× |
+| Q11 | 687.7 ± 21.6 ms | 3.656 ± 0.523 s | 5.32× |
+| Q12 | 5.092 ± 0.060 s | 17.147 ± 0.323 s | 3.37× |
+| Q13 | 3.136 ± 0.077 s | 5.140 ± 0.035 s | 1.64× |
+| Q14 | 5.271 ± 0.091 s | 12.279 ± 0.529 s | 2.33× |
+| Q15 | 4.608 ± 0.024 s | 10.220 ± 0.097 s | 2.22× |
+| Q16 | 466.9 ± 55.0 ms | 2.603 ± 0.030 s | 5.57× |
+| Q17 | 4.943 ± 0.140 s | 11.050 ± 0.093 s | 2.24× |
+| Q18 | 3.811 ± 0.058 s | 14.871 ± 0.111 s | 3.90× |
+| Q19 | 7.465 ± 0.060 s | 12.750 ± 0.207 s | 1.71× |
+| Q20 | 6.902 ± 0.608 s | 14.742 ± 0.362 s | 2.14× |
+| Q21 | 5.114 ± 0.130 s | 15.753 ± 0.138 s | 3.08× |
+| Q22 | 868.8 ± 58.4 ms | 2.308 ± 0.026 s | 2.66× |
 
 Local SF10 and remote SF1 are separate runs and should not be compared directly.
 
