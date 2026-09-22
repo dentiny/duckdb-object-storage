@@ -4,7 +4,7 @@ use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::slice;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use tokio::runtime::Runtime;
 
@@ -147,7 +147,7 @@ pub struct FfiFileSystem {
 
 pub struct FfiFileHandle {
     runtime: Arc<Runtime>,
-    handle: Mutex<Option<Box<dyn FileHandle + Send>>>,
+    handle: RwLock<Option<Box<dyn FileHandle>>>,
 }
 
 thread_local! {
@@ -305,20 +305,36 @@ fn duration_as_milliseconds(duration: std::time::Duration) -> f64 {
     duration.as_secs() as f64 * 1000.0 + f64::from(duration.subsec_nanos()) / 1_000_000.0
 }
 
-unsafe fn with_file_handle<T>(
+unsafe fn with_shared_file_handle<T>(
     handle: *const FfiFileHandle,
-    operation: impl FnOnce(&Runtime, &mut (dyn FileHandle + Send)) -> Result<T>,
+    operation: impl FnOnce(&Runtime, &dyn FileHandle) -> Result<T>,
+) -> Result<T> {
+    let handle = unsafe { handle.as_ref() }
+        .ok_or_else(|| Error::invalid_argument("file handle pointer must not be null"))?;
+    let guard = handle
+        .handle
+        .read()
+        .map_err(|_| Error::invalid_argument("file handle lock is poisoned"))?;
+    let file = guard
+        .as_deref()
+        .ok_or_else(|| Error::invalid_argument("file handle is closed"))?;
+    operation(&handle.runtime, file)
+}
+
+unsafe fn with_exclusive_file_handle<T>(
+    handle: *const FfiFileHandle,
+    operation: impl FnOnce(&Runtime, &mut dyn FileHandle) -> Result<T>,
 ) -> Result<T> {
     let handle = unsafe { handle.as_ref() }
         .ok_or_else(|| Error::invalid_argument("file handle pointer must not be null"))?;
     let mut guard = handle
         .handle
-        .lock()
+        .write()
         .map_err(|_| Error::invalid_argument("file handle lock is poisoned"))?;
     let file = guard
-        .as_mut()
+        .as_deref_mut()
         .ok_or_else(|| Error::invalid_argument("file handle is closed"))?;
-    operation(&handle.runtime, file.as_mut())
+    operation(&handle.runtime, file)
 }
 
 unsafe fn read_buffer<'a>(buffer: *mut u8, len: usize) -> Result<&'a mut [u8]> {
@@ -508,7 +524,7 @@ pub unsafe extern "C" fn slatedb_fs_open_file(
         let handle = fs.runtime.block_on(fs.fs.open_file(path, flags))?;
         *output = Box::into_raw(Box::new(FfiFileHandle {
             runtime: Arc::clone(&fs.runtime),
-            handle: Mutex::new(Some(handle)),
+            handle: RwLock::new(Some(handle)),
         }));
         Ok(())
     })
@@ -570,7 +586,7 @@ pub unsafe extern "C" fn slatedb_file_read(
         *bytes_read = 0;
         let buffer = unsafe { read_buffer(buffer, len)? };
         *bytes_read = unsafe {
-            with_file_handle(handle, |runtime, file| runtime.block_on(file.read(buffer)))?
+            with_exclusive_file_handle(handle, |runtime, file| runtime.block_on(file.read(buffer)))?
         };
         Ok(())
     })
@@ -590,7 +606,7 @@ pub unsafe extern "C" fn slatedb_file_pread(
         *bytes_read = 0;
         let buffer = unsafe { read_buffer(buffer, len)? };
         *bytes_read = unsafe {
-            with_file_handle(handle, |runtime, file| {
+            with_shared_file_handle(handle, |runtime, file| {
                 runtime.block_on(file.pread(buffer, offset))
             })?
         };
@@ -611,7 +627,9 @@ pub unsafe extern "C" fn slatedb_file_write(
         *bytes_written = 0;
         let buffer = unsafe { write_buffer(buffer, len)? };
         *bytes_written = unsafe {
-            with_file_handle(handle, |runtime, file| runtime.block_on(file.write(buffer)))?
+            with_exclusive_file_handle(handle, |runtime, file| {
+                runtime.block_on(file.write(buffer))
+            })?
         };
         Ok(())
     })
@@ -627,7 +645,7 @@ pub unsafe extern "C" fn slatedb_file_pwrite(
     ffi_result(|| {
         let buffer = unsafe { write_buffer(buffer, len)? };
         unsafe {
-            with_file_handle(handle, |runtime, file| {
+            with_exclusive_file_handle(handle, |runtime, file| {
                 runtime.block_on(file.pwrite(buffer, offset))
             })
         }
@@ -637,14 +655,14 @@ pub unsafe extern "C" fn slatedb_file_pwrite(
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_file_sync(handle: *const FfiFileHandle) -> i32 {
     ffi_result(|| unsafe {
-        with_file_handle(handle, |runtime, file| runtime.block_on(file.sync()))
+        with_exclusive_file_handle(handle, |runtime, file| runtime.block_on(file.sync()))
     })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_file_truncate(handle: *const FfiFileHandle, new_size: u64) -> i32 {
     ffi_result(|| unsafe {
-        with_file_handle(handle, |runtime, file| {
+        with_exclusive_file_handle(handle, |runtime, file| {
             runtime.block_on(file.truncate(new_size))
         })
     })
@@ -653,7 +671,7 @@ pub unsafe extern "C" fn slatedb_file_truncate(handle: *const FfiFileHandle, new
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_file_seek(handle: *const FfiFileHandle, position: u64) -> i32 {
     ffi_result(|| unsafe {
-        with_file_handle(handle, |_, file| {
+        with_exclusive_file_handle(handle, |_, file| {
             file.seek(position);
             Ok(())
         })
@@ -668,7 +686,7 @@ pub unsafe extern "C" fn slatedb_file_get_position(
     ffi_result(|| {
         let output = unsafe { require_output(output, "file position output")? };
         *output = 0;
-        *output = unsafe { with_file_handle(handle, |_, file| Ok(file.seek_position()))? };
+        *output = unsafe { with_shared_file_handle(handle, |_, file| Ok(file.seek_position()))? };
         Ok(())
     })
 }
@@ -681,7 +699,7 @@ pub unsafe extern "C" fn slatedb_file_get_size(
     ffi_result(|| {
         let output = unsafe { require_output(output, "file size output")? };
         *output = 0;
-        *output = unsafe { with_file_handle(handle, |_, file| Ok(file.file_size()))? };
+        *output = unsafe { with_shared_file_handle(handle, |_, file| Ok(file.file_size()))? };
         Ok(())
     })
 }
@@ -693,7 +711,7 @@ pub unsafe extern "C" fn slatedb_file_close(handle: *mut FfiFileHandle) -> i32 {
             .ok_or_else(|| Error::invalid_argument("file handle pointer must not be null"))?;
         let mut guard = handle
             .handle
-            .lock()
+            .write()
             .map_err(|_| Error::invalid_argument("file handle lock is poisoned"))?;
         let Some(file) = guard.as_mut() else {
             return Ok(());

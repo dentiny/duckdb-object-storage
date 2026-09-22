@@ -16,9 +16,9 @@ use crate::util::current_time_millis;
 
 /// Sequential and positional I/O, matching DuckDB's `FileHandle` methods.
 #[async_trait]
-pub trait FileHandle: Debug {
+pub trait FileHandle: Debug + Send + Sync {
     /// Read at `offset` without moving the file position.
-    async fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize>;
+    async fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize>;
 
     /// Write at `offset` without moving the file position.
     async fn pwrite(&mut self, data: &[u8], offset: u64) -> Result<()>;
@@ -187,7 +187,7 @@ impl Debug for SlateFileHandle {
 
 #[async_trait]
 impl FileHandle for SlateFileHandle {
-    async fn pread(&mut self, buf: &mut [u8], offset: u64) -> Result<usize> {
+    async fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
         self.flags.ensure_readable(self.file_id)?;
 
         if buf.is_empty() || offset >= self.size {
@@ -431,6 +431,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn positional_reads_can_share_a_handle() {
+        let fixture = TestDb::new().await;
+        let mut handle = fixture.handle(11, FileOpenFlags::open_or_create());
+        handle.pwrite(b"abcdefgh", 0).await.unwrap();
+        handle.sync().await.unwrap();
+
+        let mut first = [0; 4];
+        let mut second = [0; 4];
+        let (first_read, second_read) =
+            tokio::join!(handle.pread(&mut first, 0), handle.pread(&mut second, 4));
+
+        assert_eq!(first_read.unwrap(), first.len());
+        assert_eq!(second_read.unwrap(), second.len());
+        assert_eq!(&first, b"abcd");
+        assert_eq!(&second, b"efgh");
+
+        handle.close().await.unwrap();
+        drop(handle);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
     async fn writes_persist_across_chunks_and_reopen() {
         let fixture = TestDb::new().await;
         let mut handle = fixture.handle(2, FileOpenFlags::open_or_create());
@@ -441,7 +463,7 @@ mod tests {
         handle.close().await.unwrap();
         drop(handle);
 
-        let mut reopened = fixture.reopen(2, FileOpenFlags::read_only()).await;
+        let reopened = fixture.reopen(2, FileOpenFlags::read_only()).await;
         let mut boundary = [0u8; 3];
         reopened
             .pread(&mut boundary, SMALL_CHUNK - 1)
@@ -540,7 +562,7 @@ mod tests {
         handle.close().await.unwrap();
         drop(handle);
 
-        let mut reopened = fixture.reopen(9, FileOpenFlags::read_only()).await;
+        let reopened = fixture.reopen(9, FileOpenFlags::read_only()).await;
         assert_eq!(reopened.pread(&mut buf, 0).await.unwrap(), buf.len());
         assert_eq!(&buf, b"aaaaaaaaZZZZZZZZ\0\0\0\0\0\0\0\0");
 
