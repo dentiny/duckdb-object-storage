@@ -4,11 +4,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use slatedb::bytes::Bytes;
+use slatedb::config::ScanOptions;
 use slatedb::{Db, DbReader};
 
 #[cfg(test)]
 use crate::error::Error;
 use crate::error::Result;
+
+const SCAN_MAX_FETCH_TASKS: usize = 4;
 
 /// Key/value reads a chunk manager issues. A trait rather than [`Db`] so tests
 /// can wrap it in a store that fails on demand.
@@ -18,7 +21,16 @@ pub(crate) trait ChunkStore: Send + Sync {
     async fn get(&self, key: &[u8]) -> Result<Option<Bytes>>;
 
     /// Pairs from `first` to `last` inclusive, ascending.
-    async fn scan_inclusive(&self, first: &[u8], last: &[u8]) -> Result<Vec<(Bytes, Bytes)>>;
+    ///
+    /// `read_ahead_bytes` is the useful byte span requested by the caller. It
+    /// lets SlateDB combine adjacent SST blocks without fetching past the
+    /// logical file read.
+    async fn scan_inclusive(
+        &self,
+        first: &[u8],
+        last: &[u8],
+        read_ahead_bytes: usize,
+    ) -> Result<Vec<(Bytes, Bytes)>>;
 
     /// Keys under `prefix`, ascending.
     async fn keys_with_prefix(&self, prefix: &[u8]) -> Result<Vec<Bytes>>;
@@ -41,8 +53,17 @@ impl ChunkStore for SlateDbChunkStore {
         Ok(self.db.get(key).await?)
     }
 
-    async fn scan_inclusive(&self, first: &[u8], last: &[u8]) -> Result<Vec<(Bytes, Bytes)>> {
-        let mut iter = self.db.scan(first..=last).await?;
+    async fn scan_inclusive(
+        &self,
+        first: &[u8],
+        last: &[u8],
+        read_ahead_bytes: usize,
+    ) -> Result<Vec<(Bytes, Bytes)>> {
+        let options = ScanOptions::default()
+            .with_read_ahead_bytes(read_ahead_bytes)
+            .with_max_fetch_tasks(SCAN_MAX_FETCH_TASKS)
+            .with_cache_blocks(true);
+        let mut iter = self.db.scan_with_options(first..=last, &options).await?;
         let mut pairs = Vec::new();
         while let Some(kv) = iter.next().await? {
             pairs.push((kv.key, kv.value));
@@ -77,8 +98,20 @@ impl ChunkStore for SlateDbReaderChunkStore {
         Ok(self.reader.get(key).await?)
     }
 
-    async fn scan_inclusive(&self, first: &[u8], last: &[u8]) -> Result<Vec<(Bytes, Bytes)>> {
-        let mut iter = self.reader.scan(first..=last).await?;
+    async fn scan_inclusive(
+        &self,
+        first: &[u8],
+        last: &[u8],
+        read_ahead_bytes: usize,
+    ) -> Result<Vec<(Bytes, Bytes)>> {
+        let options = ScanOptions::default()
+            .with_read_ahead_bytes(read_ahead_bytes)
+            .with_max_fetch_tasks(SCAN_MAX_FETCH_TASKS)
+            .with_cache_blocks(true);
+        let mut iter = self
+            .reader
+            .scan_with_options(first..=last, &options)
+            .await?;
         let mut pairs = Vec::new();
         while let Some(kv) = iter.next().await? {
             pairs.push((kv.key, kv.value));
@@ -135,9 +168,16 @@ impl ChunkStore for FaultyChunkStore {
         self.inner.get(key).await
     }
 
-    async fn scan_inclusive(&self, first: &[u8], last: &[u8]) -> Result<Vec<(Bytes, Bytes)>> {
+    async fn scan_inclusive(
+        &self,
+        first: &[u8],
+        last: &[u8],
+        read_ahead_bytes: usize,
+    ) -> Result<Vec<(Bytes, Bytes)>> {
         self.take_fault()?;
-        self.inner.scan_inclusive(first, last).await
+        self.inner
+            .scan_inclusive(first, last, read_ahead_bytes)
+            .await
     }
 
     async fn keys_with_prefix(&self, prefix: &[u8]) -> Result<Vec<Bytes>> {
@@ -173,7 +213,7 @@ mod tests {
         }
         let store = SlateDbChunkStore::new(Arc::clone(&db));
 
-        let scanned = store.scan_inclusive(b"k/2", b"k/3").await.unwrap();
+        let scanned = store.scan_inclusive(b"k/2", b"k/3", 2).await.unwrap();
         let keys = scanned
             .iter()
             .map(|(key, _)| key.clone())
@@ -209,10 +249,17 @@ mod tests {
 
         store.fail_next_operation();
         assert!(matches!(
-            store.scan_inclusive(b"k/0", b"k/9").await,
+            store.scan_inclusive(b"k/0", b"k/9", 10).await,
             Err(Error::SlateDb(_))
         ));
-        assert_eq!(store.scan_inclusive(b"k/0", b"k/9").await.unwrap().len(), 1);
+        assert_eq!(
+            store
+                .scan_inclusive(b"k/0", b"k/9", 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
 
         db.close().await.expect("close slatedb");
     }

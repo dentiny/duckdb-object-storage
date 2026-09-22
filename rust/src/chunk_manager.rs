@@ -11,6 +11,8 @@ use crate::chunk_store::ChunkStore;
 use crate::error::{Error, Result};
 use crate::keys;
 
+const MAX_SCAN_READ_AHEAD_BYTES: usize = 4 * 1024 * 1024;
+
 enum PendingChunk {
     Written(Vec<u8>),
     Deleted,
@@ -242,11 +244,13 @@ impl ChunkManager {
 
         // Fixed width hex keys: adjacent indices are adjacent keys, and the
         // range cannot cross into another file.
+        let read_ahead_bytes = scan_read_ahead_bytes(first, last, self.chunk_size);
         let scanned = self
             .store
             .scan_inclusive(
                 &keys::chunk_key(self.file_id, first),
                 &keys::chunk_key(self.file_id, last),
+                read_ahead_bytes,
             )
             .await?;
         scanned
@@ -288,6 +292,14 @@ impl Debug for ChunkManager {
             .field("pending", &self.pending)
             .finish()
     }
+}
+
+fn scan_read_ahead_bytes(first: u64, last: u64, chunk_size: usize) -> usize {
+    let chunk_count =
+        usize::try_from(last.saturating_sub(first).saturating_add(1)).unwrap_or(usize::MAX);
+    chunk_count
+        .saturating_mul(chunk_size)
+        .clamp(1, MAX_SCAN_READ_AHEAD_BYTES)
 }
 
 /// Copy the part of `chunk` that `slice` selects into `buf`. A short chunk
@@ -409,6 +421,15 @@ mod tests {
         assert_eq!(
             coalesce_chunk_indices(&[u64::MAX - 1, u64::MAX]),
             vec![u64::MAX - 1..=u64::MAX]
+        );
+    }
+
+    #[test]
+    fn scan_read_ahead_tracks_span_and_caps_at_four_mib() {
+        assert_eq!(scan_read_ahead_bytes(4, 5, SMALL_CHUNK), 2 * SMALL_CHUNK);
+        assert_eq!(
+            scan_read_ahead_bytes(0, u64::MAX, usize::MAX),
+            MAX_SCAN_READ_AHEAD_BYTES
         );
     }
 

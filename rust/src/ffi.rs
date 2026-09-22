@@ -345,8 +345,6 @@ unsafe fn write_buffer<'a>(buffer: *const u8, len: usize) -> Result<&'a [u8]> {
 
 fn create_runtime() -> Result<Arc<Runtime>> {
     tokio::runtime::Builder::new_multi_thread()
-        // TODO(hjiang): Tune the worker count.
-        .worker_threads(1)
         .enable_all()
         .build()
         .map(Arc::new)
