@@ -1,6 +1,6 @@
 build
 .cache/
-docs/BENCHMARK*_REPORT.html
+*.html
 rust/target/
 .idea
 cmake-build-debug

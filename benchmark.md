@@ -1,11 +1,11 @@
 # Benchmarks
 
-`scripts/run_benchmarks.py` compares native DuckDB with ObjFS using TPC-H.
+`scripts/run_read_benchmarks.py` compares native DuckDB with ObjFS using TPC-H reads.
 It currently supports macOS only (`system_profiler` is used for host metadata)
 and builds the release binary automatically. Run commands from the repository
 root.
 
-## Results
+## Read results
 
 Results with DuckDB `v1.5.5` on an Apple M4 (10 cores, 16 GB memory,
 default 10 threads). Local SF10 used commit `21bae82`; remote SF1 used
@@ -113,12 +113,45 @@ query ratio is 2.60×.
 
 Local SF10 and remote SF1 are separate runs and should not be compared directly.
 
+## Write results
+
+### Write: local filesystem
+
+TPC-H SF10 `lineitem`, three fresh databases per backend. Throughput covers
+`CREATE TABLE AS SELECT` and `CHECKPOINT`; higher is better. Bars show medians
+and whiskers show one sample standard deviation.
+
+![Local write throughput](docs/benchmark-results/write-local.png)
+
+| Backend | Median ± SD (rows/s) |
+| --- | ---: |
+| Native | 8,014,063 ± 747,845 |
+| ObjFS | 1,551,799 ± 813,842 |
+
+ObjFS/native median throughput: 0.19×.
+
+### Write: S3 delivery
+
+TPC-H SF1 `lineitem`, three fresh databases per backend. Native writes and
+checkpoints locally, then uploads its `.duckdb` file; ObjFS writes and
+checkpoints directly to S3. Throughput covers these respective delivery paths.
+
+![S3 write delivery throughput](docs/benchmark-results/write-remote.png)
+
+| Backend | Median ± SD (rows/s) |
+| --- | ---: |
+| Native + upload | 188,642 ± 629 |
+| ObjFS direct S3 | 180,076 ± 8,813 |
+
+ObjFS/native median throughput: 0.95×. Both write comparisons use the same
+in-memory source within each run; source generation and verification are untimed.
+
 ## Quick check
 
 Run SF0.01 Q6 once to verify the build and report generation:
 
 ```sh
-python3 scripts/run_benchmarks.py --smoke
+python3 scripts/run_read_benchmarks.py --smoke
 ```
 
 Use `--runs N` to set measured executions per query (default: 3; smoke: 1).
@@ -129,7 +162,7 @@ Compare native and ObjFS memory and local-filesystem backends with SF10,
 TPC-H Q1-Q22, one warm-up, and three measured runs:
 
 ```sh
-python3 scripts/run_benchmarks.py --scale-factor 10
+python3 scripts/run_read_benchmarks.py --scale-factor 10
 ```
 
 ## S3 benchmark
@@ -148,7 +181,7 @@ The runner creates a unique `benchmarks/<run-id>/` prefix. Native DuckDB runs
 Each query uses a fresh process and runs three times without a warm-up.
 
 ```sh
-caffeinate -dimsu python3 scripts/run_benchmarks.py \
+caffeinate -dimsu python3 scripts/run_read_benchmarks.py \
   --remote \
   --scale-factor 1 \
   --s3-bucket <bucket> \
@@ -174,12 +207,59 @@ Each run writes raw data, logs, profiles, `results.json`, and `summary.csv` to:
 .cache/object-storage-benchmark/<run>/
 ```
 
-The generated HTML report is written to `docs/BENCHMARK_REPORT.html` for local
-runs or `docs/BENCHMARK_REMOTE_REPORT.html` for S3 runs. These generated reports
+The generated HTML report is written to `docs/BENCHMARK_READ_REPORT.html` for local
+runs or `docs/BENCHMARK_READ_REMOTE_REPORT.html` for S3 runs. These generated reports
 are ignored by Git. Rebuild a report from existing data without rerunning the
 benchmark:
 
 ```sh
-python3 scripts/run_benchmarks.py \
+python3 scripts/run_read_benchmarks.py \
   --render-results .cache/object-storage-benchmark/<run>/results.json
 ```
+
+## Write benchmark
+
+`scripts/run_write_benchmarks.py` uses DuckDB v1.5.5 to generate TPC-H data
+`lineitem` in memory before timing. Each measured run writes that table to a
+fresh database with `CREATE TABLE ... AS SELECT ...` and `CHECKPOINT`.
+The source generation, database attachment, startup, and verification are
+excluded. The benchmark reports rows/s; SQL profiler timings separately show
+the table write and checkpoint. Every result is checked after reopening.
+Local database files are deleted after verification; results and logs remain.
+Each run executes Native first, then ObjFS.
+
+Run the SF0.01 local smoke test, then the three-run SF1 local comparison:
+
+```sh
+python3 scripts/run_write_benchmarks.py --local --smoke
+python3 scripts/run_write_benchmarks.py --local
+```
+
+Use `--scale-factor 10` for SF10. As with the read benchmark, `--runs N`
+sets the repetition count (default: 3; smoke: 1); `--smoke` uses SF0.01 and
+cannot be combined with `--scale-factor`.
+
+For S3, first check that the AWS profile can access the bucket, then run
+the separate `--remote` comparison (also accepts `--smoke`):
+
+```sh
+aws sts get-caller-identity --profile <profile>
+aws s3api head-bucket --bucket <bucket> --region ap-east-2 --profile <profile>
+python3 scripts/run_write_benchmarks.py --remote \
+  --s3-bucket <bucket> --s3-region ap-east-2 --aws-profile <profile>
+```
+
+The S3 comparison measures native DuckDB writing a local `.duckdb` file and
+then uploading it with the AWS CLI, versus ObjFS writing directly to S3.
+Upload time is shown separately; HTTPFS only reopens the native S3 database
+for read-only verification. These are delivery workflows, not identical
+storage formats. Each run uses a new S3 prefix; the script does not remove
+uploaded benchmark data.
+
+Raw results and logs go to `.cache/object-storage-benchmark/<run>/`; the
+HTML reports are `docs/BENCHMARK_WRITE_REPORT.html` for local and
+`docs/BENCHMARK_WRITE_REMOTE_REPORT.html` for S3. ObjFS cache and OpenDAL I/O
+statistics are saved per run in `results.json` and summarized in each report.
+Use `--no-build` to use an existing release binary.
+Regenerate the report without rerunning the benchmark with
+`--render-results .cache/object-storage-benchmark/<run>/results.json`.
