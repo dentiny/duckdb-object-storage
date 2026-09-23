@@ -17,8 +17,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DUCKDB = ROOT / "build" / "release" / "duckdb"
-REPORT = ROOT / "docs" / "BENCHMARK_REPORT.html"
-REMOTE_REPORT = ROOT / "docs" / "BENCHMARK_REMOTE_REPORT.html"
+REPORT = ROOT / "docs" / "BENCHMARK_READ_REPORT.html"
+REMOTE_REPORT = ROOT / "docs" / "BENCHMARK_READ_REMOTE_REPORT.html"
 CACHE_ROOT = ROOT / ".cache" / "object-storage-benchmark"
 
 
@@ -943,7 +943,7 @@ code {{ font-size: .9em; }}
 </head>
 <body>
 <header>
-  <h1>DuckDB Object Storage Benchmark</h1>
+  <h1>DuckDB Object Storage Read Benchmark</h1>
   <p class="muted">Generated {generated}</p>
 </header>
 <section>
