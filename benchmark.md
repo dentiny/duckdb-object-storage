@@ -8,8 +8,8 @@ root.
 ## Read results
 
 Results with DuckDB `v1.5.5` on an Apple M4 (10 cores, 16 GB memory,
-default 10 threads). Local SF10 used commit `21bae82`; remote SF1 used
-`7d4c6c9`. Values below 1.00× favor ObjFS.
+default 10 threads). Local SF10 used commit `21bae82`; remote SF1 ObjFS used
+`c92fc88`. Values below 1.00× favor ObjFS.
 
 ### Local: memory
 
@@ -78,38 +78,37 @@ use `--runs 5` to repeat that count.
 
 ### Remote S3
 
-TPC-H SF1 with three cold executions in independent processes. Native DuckDB
-uses HTTPFS; ObjFS uses memory caches and a new empty persistent-cache directory
-for every process. Bars show medians, whiskers show one sample standard
-deviation, and labels show the ObjFS/native median ratio. The geometric-mean
-query ratio is 2.60×.
+TPC-H SF1, three cold-process runs per query. Native reads through HTTPFS;
+ObjFS uses memory cache with persistent cache disabled. Only query time is
+measured. Bars show medians ± sample standard deviation; labels show the
+ObjFS/native ratio. The two variants were measured sequentially.
 
-![S3 TPC-H query latency](docs/benchmark-results/remote-s3.png)
+![S3 TPC-H query latency without persistent cache](docs/benchmark-results/remote-s3.png)
 
 | Query | Native median ± SD | ObjFS median ± SD | ObjFS/native |
 | --- | ---: | ---: | ---: |
-| Q01 | 6.123 ± 0.388 s | 10.218 ± 0.286 s | 1.67× |
-| Q02 | 763.2 ± 58.0 ms | 2.981 ± 0.047 s | 3.91× |
-| Q03 | 5.587 ± 0.158 s | 17.162 ± 1.392 s | 3.07× |
-| Q04 | 4.188 ± 0.117 s | 16.448 ± 1.650 s | 3.93× |
-| Q05 | 5.653 ± 0.352 s | 13.205 ± 0.070 s | 2.34× |
-| Q06 | 4.584 ± 0.091 s | 8.683 ± 0.056 s | 1.89× |
-| Q07 | 6.461 ± 0.091 s | 15.289 ± 0.225 s | 2.37× |
-| Q08 | 7.336 ± 0.184 s | 13.572 ± 0.060 s | 1.85× |
-| Q09 | 8.528 ± 0.178 s | 16.717 ± 0.147 s | 1.96× |
-| Q10 | 7.426 ± 0.039 s | 14.688 ± 0.080 s | 1.98× |
-| Q11 | 687.7 ± 21.6 ms | 3.656 ± 0.523 s | 5.32× |
-| Q12 | 5.092 ± 0.060 s | 17.147 ± 0.323 s | 3.37× |
-| Q13 | 3.136 ± 0.077 s | 5.140 ± 0.035 s | 1.64× |
-| Q14 | 5.271 ± 0.091 s | 12.279 ± 0.529 s | 2.33× |
-| Q15 | 4.608 ± 0.024 s | 10.220 ± 0.097 s | 2.22× |
-| Q16 | 466.9 ± 55.0 ms | 2.603 ± 0.030 s | 5.57× |
-| Q17 | 4.943 ± 0.140 s | 11.050 ± 0.093 s | 2.24× |
-| Q18 | 3.811 ± 0.058 s | 14.871 ± 0.111 s | 3.90× |
-| Q19 | 7.465 ± 0.060 s | 12.750 ± 0.207 s | 1.71× |
-| Q20 | 6.902 ± 0.608 s | 14.742 ± 0.362 s | 2.14× |
-| Q21 | 5.114 ± 0.130 s | 15.753 ± 0.138 s | 3.08× |
-| Q22 | 868.8 ± 58.4 ms | 2.308 ± 0.026 s | 2.66× |
+| Q01 | 6.166 ± 0.128 s | 10.025 ± 0.212 s | 1.63× |
+| Q02 | 0.933 ± 0.072 s | 1.423 ± 0.098 s | 1.53× |
+| Q03 | 5.458 ± 0.096 s | 11.650 ± 0.373 s | 2.13× |
+| Q04 | 4.210 ± 0.089 s | 10.413 ± 0.240 s | 2.47× |
+| Q05 | 5.693 ± 0.018 s | 12.921 ± 0.223 s | 2.27× |
+| Q06 | 4.566 ± 0.096 s | 9.703 ± 0.300 s | 2.12× |
+| Q07 | 6.568 ± 0.185 s | 13.348 ± 0.171 s | 2.03× |
+| Q08 | 7.654 ± 0.134 s | 14.985 ± 0.198 s | 1.96× |
+| Q09 | 8.581 ± 0.084 s | 17.350 ± 0.149 s | 2.02× |
+| Q10 | 8.344 ± 0.112 s | 13.458 ± 0.456 s | 1.61× |
+| Q11 | 0.796 ± 0.099 s | 1.342 ± 0.068 s | 1.69× |
+| Q12 | 5.606 ± 0.114 s | 12.061 ± 0.234 s | 2.15× |
+| Q13 | 3.354 ± 0.084 s | 4.038 ± 0.015 s | 1.20× |
+| Q14 | 5.898 ± 0.332 s | 12.337 ± 0.589 s | 2.09× |
+| Q15 | 4.784 ± 0.094 s | 11.050 ± 0.686 s | 2.31× |
+| Q16 | 0.598 ± 0.185 s | 1.243 ± 0.181 s | 2.08× |
+| Q17 | 5.049 ± 0.081 s | 10.159 ± 0.190 s | 2.01× |
+| Q18 | 4.136 ± 0.494 s | 9.315 ± 0.154 s | 2.25× |
+| Q19 | 7.826 ± 0.580 s | 15.419 ± 0.438 s | 1.97× |
+| Q20 | 6.376 ± 0.106 s | 11.669 ± 0.328 s | 1.83× |
+| Q21 | 5.482 ± 0.645 s | 12.501 ± 0.544 s | 2.28× |
+| Q22 | 1.178 ± 0.195 s | 1.688 ± 0.034 s | 1.43× |
 
 Local SF10 and remote SF1 are separate runs and should not be compared directly.
 
@@ -179,6 +178,8 @@ The runner creates a unique `benchmarks/<run-id>/` prefix. Native DuckDB runs
 `dbgen` and `CHECKPOINT` locally, then uploads one `.duckdb` file. ObjFS runs
 `dbgen` and `CHECKPOINT` directly against S3, producing multiple objects.
 Each query uses a fresh process and runs three times without a warm-up.
+The default S3 run leaves ObjFS persistent cache disabled; process-local
+memory caches remain enabled.
 
 ```sh
 caffeinate -dimsu python3 scripts/run_read_benchmarks.py \
