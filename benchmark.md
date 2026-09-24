@@ -178,8 +178,15 @@ The runner creates a unique `benchmarks/<run-id>/` prefix. Native DuckDB runs
 `dbgen` and `CHECKPOINT` locally, then uploads one `.duckdb` file. ObjFS runs
 `dbgen` and `CHECKPOINT` directly against S3, producing multiple objects.
 Each query uses a fresh process and runs three times without a warm-up.
-The default S3 run leaves ObjFS persistent cache disabled; process-local
-memory caches remain enabled.
+
+| Reported S3 setting | Value |
+| --- | --- |
+| Client | Taipei; Apple M4, 10 cores, 16 GB RAM |
+| Storage | Same S3 bucket in `ap-east-2` |
+| DuckDB | `v1.5.5`; default 10 threads and memory limit |
+| ObjFS in-memory cache | Data blocks: 512 MiB; metadata: 128 MiB |
+| ObjFS persistent cache | Disabled |
+| Native HTTPFS cache | External file cache enabled; empty in each fresh process |
 
 ```sh
 caffeinate -dimsu python3 scripts/run_read_benchmarks.py \
