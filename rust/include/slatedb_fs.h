@@ -122,6 +122,10 @@ typedef struct slatedb_io_stats {
 	double list_average_latency_ms;
 	// Population standard deviation of OpenDAL list latency in milliseconds.
 	double list_stddev_latency_ms;
+	// Payload bytes fetched by OpenDAL reads.
+	uint64_t read_bytes;
+	// Payload bytes sent by OpenDAL writes.
+	uint64_t write_bytes;
 } slatedb_io_stats;
 
 typedef enum slatedb_fs_error_code {

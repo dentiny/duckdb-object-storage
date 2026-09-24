@@ -26,21 +26,22 @@ SELECT sum(i) FROM io_db.items
 ----
 523776
 
-query TTTT rowsort
+query TTTTT rowsort
 SELECT operation,
        (CASE WHEN operation IN ('read', 'write')
              THEN request_count > 0
              ELSE request_count >= 0
         END)::VARCHAR,
        (average_latency_ms >= 0)::VARCHAR,
-       (stddev_latency_ms >= 0)::VARCHAR
+       (stddev_latency_ms >= 0)::VARCHAR,
+       (CASE WHEN operation IN ('read', 'write') THEN bytes > 0 ELSE bytes = 0 END)::VARCHAR
 FROM duckdb_objfs_io_stats()
 ----
-delete	true	true	true
-list	true	true	true
-read	true	true	true
-stat	true	true	true
-write	true	true	true
+delete	true	true	true	true
+list	true	true	true	true
+read	true	true	true	true
+stat	true	true	true	true
+write	true	true	true	true
 
 statement ok
 DETACH io_db

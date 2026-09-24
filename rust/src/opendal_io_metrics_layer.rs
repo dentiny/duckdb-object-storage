@@ -85,7 +85,7 @@ impl Service for IoMetricsService {
                 metrics: Arc::clone(&self.metrics),
             }),
             Err(error) => {
-                self.metrics.record_read(start.elapsed());
+                self.metrics.record_read(start.elapsed(), 0);
                 Err(error)
             }
         }
@@ -98,10 +98,11 @@ impl Service for IoMetricsService {
                 inner,
                 metrics: Arc::clone(&self.metrics),
                 start,
+                bytes: 0,
                 recorded: false,
             }),
             Err(error) => {
-                self.metrics.record_write(start.elapsed());
+                self.metrics.record_write(start.elapsed(), 0);
                 Err(error)
             }
         }
@@ -202,11 +203,12 @@ impl oio::Read for IoMetricsReader {
                     inner: stream,
                     metrics: Arc::clone(&self.metrics),
                     start,
+                    bytes: 0,
                     recorded: false,
                 }),
             )),
             Err(error) => {
-                self.metrics.record_read(start.elapsed());
+                self.metrics.record_read(start.elapsed(), 0);
                 Err(error)
             }
         }
@@ -215,7 +217,8 @@ impl oio::Read for IoMetricsReader {
     async fn read(&self, range: BytesRange) -> Result<(RpRead, Buffer)> {
         let start = Instant::now();
         let result = self.inner.read(range).await;
-        self.metrics.record_read(start.elapsed());
+        let bytes = result.as_ref().map_or(0, |(_, buffer)| buffer.len() as u64);
+        self.metrics.record_read(start.elapsed(), bytes);
         result
     }
 }
@@ -224,13 +227,14 @@ struct IoMetricsReadStream {
     inner: Box<dyn oio::ReadStreamDyn>,
     metrics: Arc<IoMetrics>,
     start: Instant,
+    bytes: u64,
     recorded: bool,
 }
 
 impl IoMetricsReadStream {
     fn record_once(&mut self) {
         if !self.recorded {
-            self.metrics.record_read(self.start.elapsed());
+            self.metrics.record_read(self.start.elapsed(), self.bytes);
             self.recorded = true;
         }
     }
@@ -245,8 +249,9 @@ impl Drop for IoMetricsReadStream {
 impl oio::ReadStream for IoMetricsReadStream {
     async fn read(&mut self) -> Result<Buffer> {
         let result = self.inner.read().await;
-        if !matches!(&result, Ok(buffer) if !buffer.is_empty()) {
-            self.record_once();
+        match &result {
+            Ok(buffer) if !buffer.is_empty() => self.bytes += buffer.len() as u64,
+            _ => self.record_once(),
         }
         result
     }
@@ -256,13 +261,14 @@ struct IoMetricsWriter {
     inner: oio::Writer,
     metrics: Arc<IoMetrics>,
     start: Instant,
+    bytes: u64,
     recorded: bool,
 }
 
 impl IoMetricsWriter {
     fn record_once(&mut self) {
         if !self.recorded {
-            self.metrics.record_write(self.start.elapsed());
+            self.metrics.record_write(self.start.elapsed(), self.bytes);
             self.recorded = true;
         }
     }
@@ -276,7 +282,10 @@ impl Drop for IoMetricsWriter {
 
 impl oio::Write for IoMetricsWriter {
     async fn write(&mut self, buffer: Buffer) -> Result<()> {
-        self.inner.write(buffer).await
+        let len = buffer.len() as u64;
+        self.inner.write(buffer).await?;
+        self.bytes += len;
+        Ok(())
     }
 
     async fn copy_from(&mut self, path: &str, args: OpRead, range: BytesRange) -> Result<()> {
@@ -386,7 +395,9 @@ mod tests {
 
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.write.request_count, 1);
+        assert_eq!(snapshot.write.bytes, 5);
         assert_eq!(snapshot.read.request_count, 1);
+        assert_eq!(snapshot.read.bytes, 5);
         assert_eq!(snapshot.stat.request_count, 1);
         assert_eq!(snapshot.list.request_count, 1);
         assert_eq!(snapshot.delete.request_count, 1);

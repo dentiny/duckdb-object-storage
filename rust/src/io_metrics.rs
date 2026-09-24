@@ -6,6 +6,8 @@ use crate::fs::SlateDbFileSystem;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct IoOperationStats {
     pub request_count: u64,
+    /// Payload bytes transferred; only reads and writes carry any.
+    pub bytes: u64,
     pub average_latency: Duration,
     pub stddev_latency: Duration,
 }
@@ -22,14 +24,16 @@ pub struct IoStats {
 #[derive(Debug, Default)]
 struct RunningStats {
     count: u64,
+    bytes: u64,
     mean: f64,
     squared_deviation_sum: f64,
 }
 
 impl RunningStats {
-    fn record(&mut self, duration: Duration) {
+    fn record(&mut self, duration: Duration, bytes: u64) {
         let latency = duration.as_secs_f64();
         self.count += 1;
+        self.bytes += bytes;
         let delta = latency - self.mean;
         self.mean += delta / self.count as f64;
         let delta_after_mean_update = latency - self.mean;
@@ -44,6 +48,7 @@ impl RunningStats {
         };
         IoOperationStats {
             request_count: self.count,
+            bytes: self.bytes,
             average_latency: Duration::from_secs_f64(self.mean),
             stddev_latency: Duration::from_secs_f64(variance.sqrt()),
         }
@@ -70,24 +75,24 @@ impl IoMetrics {
         }
     }
 
-    pub(crate) fn record_read(&self, duration: Duration) {
-        lock_or_recover(&self.read).record(duration);
+    pub(crate) fn record_read(&self, duration: Duration, bytes: u64) {
+        lock_or_recover(&self.read).record(duration, bytes);
     }
 
-    pub(crate) fn record_write(&self, duration: Duration) {
-        lock_or_recover(&self.write).record(duration);
+    pub(crate) fn record_write(&self, duration: Duration, bytes: u64) {
+        lock_or_recover(&self.write).record(duration, bytes);
     }
 
     pub(crate) fn record_stat(&self, duration: Duration) {
-        lock_or_recover(&self.stat).record(duration);
+        lock_or_recover(&self.stat).record(duration, 0);
     }
 
     pub(crate) fn record_delete(&self, duration: Duration) {
-        lock_or_recover(&self.delete).record(duration);
+        lock_or_recover(&self.delete).record(duration, 0);
     }
 
     pub(crate) fn record_list(&self, duration: Duration) {
-        lock_or_recover(&self.list).record(duration);
+        lock_or_recover(&self.list).record(duration, 0);
     }
 }
 
@@ -110,11 +115,12 @@ mod tests {
     #[test]
     fn calculates_population_average_and_standard_deviation() {
         let mut stats = RunningStats::default();
-        stats.record(Duration::from_secs(1));
-        stats.record(Duration::from_secs(3));
+        stats.record(Duration::from_secs(1), 5);
+        stats.record(Duration::from_secs(3), 7);
 
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.request_count, 2);
+        assert_eq!(snapshot.bytes, 12);
         assert_eq!(snapshot.average_latency, Duration::from_secs(2));
         assert_eq!(snapshot.stddev_latency, Duration::from_secs(1));
     }
