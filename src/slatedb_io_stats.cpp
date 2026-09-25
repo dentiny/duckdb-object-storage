@@ -3,6 +3,8 @@
 
 #include "duckdb/common/exception.hpp"
 
+#include <optional>
+
 namespace duckdb {
 
 namespace {
@@ -75,7 +77,7 @@ void IoStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &outp
 		uint64_t request_count;
 		double average_ms;
 		double stddev_ms;
-		uint64_t bytes = 0;
+		std::optional<uint64_t> bytes;
 		if (state.offset == 0) {
 			operation = "read";
 			request_count = state.stats.read_request_count;
@@ -110,7 +112,7 @@ void IoStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &outp
 		output.SetValue(1, count, Value::UBIGINT(request_count));
 		output.SetValue(2, count, Value::DOUBLE(average_ms));
 		output.SetValue(3, count, Value::DOUBLE(stddev_ms));
-		output.SetValue(4, count, state.offset < 2 ? Value::UBIGINT(bytes) : Value());
+		output.SetValue(4, count, bytes ? Value::UBIGINT(*bytes) : Value());
 		state.offset++;
 		count++;
 	}
