@@ -9,6 +9,7 @@ memory, on the local filesystem, or in S3-compatible object storage.
 Local storage is the default backend and requires no configuration:
 
 ```sql
+INSTALL duckdb_object_storage FROM community; 
 LOAD duckdb_object_storage;
 
 ATTACH 'duckdb_objfs://database.db' AS object_db;
@@ -17,20 +18,33 @@ INSERT INTO object_db.items VALUES (1), (2);
 CHECKPOINT object_db;
 ```
 
-By default, SlateDB stores its data under `.duckdb_objfs` in the current
-working directory. Set `duckdb_objfs_root` before the first
-`duckdb_objfs://` access to choose another directory:
+By default, SlateDB stores its data under `.duckdb_objfs` in the current working directory. Set `duckdb_objfs_root` before the first `duckdb_objfs://` access to choose another directory:
 
 ```sql
 SET duckdb_objfs_root = '/var/lib/duckdb-objfs';
 ATTACH 'duckdb_objfs://database.db' AS object_db;
 ```
 
+## In-memory backend
+
+Set the backend before the first `duckdb_objfs://` access to keep the SlateDB
+objects in process memory:
+
+```sql
+SET duckdb_objfs_backend = 'memory';
+ATTACH 'duckdb_objfs://database.db' AS object_db;
+```
+
+The in-memory backend is ephemeral: its data is lost when the DuckDB process
+exits. It is primarily useful for testing.
+
 ## S3 backend
 
-The extension uses DuckDB's Secret Manager for credentials and endpoint
-configuration. Install and load `cache_httpfs` to register the standard
-`TYPE S3` secret:
+The extension uses DuckDB's Secret Manager for credentials and endpoint configuration. Install and load `cache_httpfs` to register the standard `TYPE S3` secret:
+
+`duckdb_objfs_bucket` is required for the S3 backend. `duckdb_objfs_root` is
+optional and selects the object-key prefix within that bucket; when omitted,
+it defaults to `duckdb_objfs`.
 
 ```sql
 INSTALL cache_httpfs FROM community;
@@ -278,4 +292,3 @@ enough that concurrent writers must be treated as a configuration error, not a
 supported mode. Use external coordination or a single-writer deployment to
 guarantee exclusivity. Read-only attachments are unaffected: any number of
 processes may attach read-only alongside the writer and each other.
-
