@@ -19,6 +19,7 @@ from run_read_benchmarks import (
     command,
     directory_size,
     duckdb,
+    format_bytes,
     objfs_s3_sql,
     objfs_sql,
     parse_profiles,
@@ -264,16 +265,19 @@ def objfs_stats_html(samples, case):
         count = sum(row["request_count"] or 0 for row in entries)
         weighted_ms = sum((row["request_count"] or 0) * (row["average_latency_ms"] or 0) for row in entries)
         average = f"{weighted_ms / count:.1f}" if count else "—"
-        io_rows.append(f"<tr><td>{operation}</td><td>{count:,}</td><td>{average}</td></tr>")
+        size = "—"
+        if operation in ("read", "write") and entries and all(row.get("bytes") is not None for row in entries):
+            size = format_bytes(sum(row["bytes"] for row in entries))
+        io_rows.append(f"<tr><td>{operation}</td><td>{count:,}</td><td>{size}</td><td>{average}</td></tr>")
     cache_html = f"""<h3>Cache</h3>
 <table><thead><tr><th>Cache</th><th>Hits</th><th>Misses</th><th>Hit rate</th></tr></thead>
 <tbody>{''.join(cache_rows)}</tbody></table>""" if has_cache_activity else ""
     return f"""
 <h2>ObjFS {'cache and ' if has_cache_activity else ''}I/O statistics</h2>
-<p>Totals across {len(records)} ObjFS runs; verification excluded. I/O latency is weighted by request count.</p>
+<p>Totals across {len(records)} ObjFS runs; verification excluded. Bytes are OpenDAL payload, not S3 wire traffic. I/O latency is weighted by request count.</p>
 {cache_html}
 <h3>OpenDAL operations</h3>
-<table><thead><tr><th>Operation</th><th>Requests</th><th>Average latency (ms)</th></tr></thead>
+<table><thead><tr><th>Operation</th><th>Requests</th><th>Bytes</th><th>Average latency (ms)</th></tr></thead>
 <tbody>{''.join(io_rows)}</tbody></table>
 """
 

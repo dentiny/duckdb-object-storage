@@ -95,6 +95,7 @@ def read_stats(path):
         "eviction_count",
         "evicted_bytes",
         "request_count",
+        "bytes",
     }
     float_fields = {"hit_rate", "average_latency_ms", "stddev_latency_ms"}
     with path.open(newline="", encoding="utf-8") as file:
@@ -687,9 +688,12 @@ def cache_summary(data, queries):
             for row in sample["io_stats"]:
                 count = row["request_count"]
                 for target in (operations, query_operations):
-                    totals = target.setdefault(row["operation"], [0, 0.0])
+                    totals = target.setdefault(row["operation"], [0, 0.0, 0])
                     totals[0] += count
                     totals[1] += count * (row["average_latency_ms"] or 0)
+                    if totals[2] is not None:
+                        payload_bytes = row.get("bytes")
+                        totals[2] = totals[2] + payload_bytes if payload_bytes is not None else None
 
         def cache_cell(name):
             hits, misses = query_caches.get(name, (0, 0))
@@ -700,8 +704,9 @@ def cache_summary(data, queries):
         def requests_per_run(name):
             return f"{query_operations.get(name, (0, 0))[0] / len(samples):.1f}"
 
-        read_count, read_latency = query_operations.get("read", (0, 0.0))
+        read_count, read_latency, read_bytes = query_operations.get("read", (0, 0.0, None))
         average_read_latency = f"{read_latency / read_count:.1f} ms" if read_count else "—"
+        read_bytes_per_run = format_bytes(read_bytes / len(samples)) if read_bytes is not None else "—"
         other_operations = (
             f"{requests_per_run('stat')} stat · {requests_per_run('list')} list · "
             f"{requests_per_run('write')} write · {requests_per_run('delete')} delete"
@@ -711,7 +716,7 @@ def cache_summary(data, queries):
             f"<td>{cache_cell('memory_metadata')}</td><td>{cache_cell('persistent')}</td>"
             f"<td><strong class='metric'>{requests_per_run('read')} reads</strong>"
             f"<small>{other_operations}</small></td>"
-            f"<td>{average_read_latency}</td></tr>"
+            f"<td>{average_read_latency}</td><td>{read_bytes_per_run}</td></tr>"
         )
 
     cache_rows = []
@@ -729,9 +734,10 @@ def cache_summary(data, queries):
 
     operation_rows = []
     for name in ("read", "stat", "list", "write", "delete"):
-        count, total_latency = operations.get(name, (0, 0.0))
+        count, total_latency, total_bytes = operations.get(name, (0, 0.0, None))
         average = f"{total_latency / count:.1f} ms" if count else "—"
-        operation_rows.append(f"<tr><td>{name}</td><td>{count:,}</td><td>{average}</td></tr>")
+        size = format_bytes(total_bytes) if name in ("read", "write") else "—"
+        operation_rows.append(f"<tr><td>{name}</td><td>{count:,}</td><td>{size}</td><td>{average}</td></tr>")
 
     persistent_enabled = data["config"].get("persistent_cache", False)
     persistent_note = (
@@ -750,15 +756,15 @@ def cache_summary(data, queries):
     <tbody>{''.join(cache_rows)}</tbody>
   </table>
   <h3>OpenDAL operations</h3>
-  <p class="caption">Request counts are totals. Average latency is weighted by the number of requests reported by each process.</p>
+  <p class="caption">Counts and bytes are totals; bytes are OpenDAL payload, not S3 wire traffic. Average latency is weighted by request count.</p>
   <table>
-    <thead><tr><th>Operation</th><th>Requests</th><th>Average latency</th></tr></thead>
+    <thead><tr><th>Operation</th><th>Requests</th><th>Bytes</th><th>Average latency</th></tr></thead>
     <tbody>{''.join(operation_rows)}</tbody>
   </table>
   <h3>Per-query statistics</h3>
   <p class="caption">Hit rate is hits / (hits + misses), using totals from {data['config']['runs']} runs. Data, metadata, and persistent caches count different lookup types, so their totals are not expected to match. OpenDAL operations are averages per process.</p>
   <div class="table-wrap"><table>
-    <thead><tr><th>Query</th><th>Data-block cache</th><th>Metadata cache</th><th>Persistent SST cache</th><th>OpenDAL requests/run</th><th>Avg read latency</th></tr></thead>
+    <thead><tr><th>Query</th><th>Data-block cache</th><th>Metadata cache</th><th>Persistent SST cache</th><th>OpenDAL requests/run</th><th>Avg read latency</th><th>Read bytes/run</th></tr></thead>
     <tbody>{''.join(query_rows)}</tbody>
   </table></div>
 </section>

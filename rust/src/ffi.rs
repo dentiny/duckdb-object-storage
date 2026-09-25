@@ -136,6 +136,10 @@ pub struct FfiIoStats {
     list_average_latency_ms: f64,
     /// Population standard deviation of OpenDAL list latency in milliseconds.
     list_stddev_latency_ms: f64,
+    /// Payload bytes fetched by OpenDAL reads.
+    read_bytes: u64,
+    /// Payload bytes sent by OpenDAL writes.
+    write_bytes: u64,
 }
 
 /// Synchronous FFI context owning the one async runtime used by this
@@ -503,6 +507,8 @@ pub unsafe extern "C" fn slatedb_fs_get_io_stats(
             list_request_count: stats.list.request_count,
             list_average_latency_ms: duration_as_milliseconds(stats.list.average_latency),
             list_stddev_latency_ms: duration_as_milliseconds(stats.list.stddev_latency),
+            read_bytes: stats.read.bytes,
+            write_bytes: stats.write.bytes,
         };
         Ok(())
     })

@@ -3,6 +3,8 @@
 
 #include "duckdb/common/exception.hpp"
 
+#include <optional>
+
 namespace duckdb {
 
 namespace {
@@ -46,6 +48,8 @@ unique_ptr<FunctionData> IoStatsBind(ClientContext &, TableFunctionBindInput &in
 	return_types.emplace_back(LogicalType::DOUBLE);
 	names.emplace_back("stddev_latency_ms");
 	return_types.emplace_back(LogicalType::DOUBLE);
+	names.emplace_back("bytes");
+	return_types.emplace_back(LogicalType::UBIGINT);
 
 	if (!input.info) {
 		throw InternalException("duckdb_objfs_io_stats is missing function information");
@@ -73,16 +77,19 @@ void IoStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &outp
 		uint64_t request_count;
 		double average_ms;
 		double stddev_ms;
+		std::optional<uint64_t> bytes;
 		if (state.offset == 0) {
 			operation = "read";
 			request_count = state.stats.read_request_count;
 			average_ms = state.stats.read_average_latency_ms;
 			stddev_ms = state.stats.read_stddev_latency_ms;
+			bytes = state.stats.read_bytes;
 		} else if (state.offset == 1) {
 			operation = "write";
 			request_count = state.stats.write_request_count;
 			average_ms = state.stats.write_average_latency_ms;
 			stddev_ms = state.stats.write_stddev_latency_ms;
+			bytes = state.stats.write_bytes;
 		} else if (state.offset == 2) {
 			operation = "stat";
 			request_count = state.stats.stat_request_count;
@@ -105,6 +112,7 @@ void IoStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &outp
 		output.SetValue(1, count, Value::UBIGINT(request_count));
 		output.SetValue(2, count, Value::DOUBLE(average_ms));
 		output.SetValue(3, count, Value::DOUBLE(stddev_ms));
+		output.SetValue(4, count, bytes ? Value::UBIGINT(*bytes) : Value());
 		state.offset++;
 		count++;
 	}
