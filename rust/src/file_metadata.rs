@@ -5,7 +5,9 @@ use prost::Message;
 use crate::error::{Error, Result};
 use crate::util::current_time_millis;
 
-/// Matches DuckDB's `DEFAULT_BLOCK_ALLOC_SIZE` of 262144.
+/// Matches DuckDB's `DEFAULT_BLOCK_ALLOC_SIZE` of 262144. DuckDB database
+/// blocks start after a 12 KiB file header, so equal sizes do not imply equal
+/// boundaries; the S3 FFI path coalesces adjacent block reads before chunking.
 pub(crate) const DEFAULT_CHUNK_SIZE: u64 = 256 * 1024;
 
 include!(concat!(env!("OUT_DIR"), "/slatefs.rs"));

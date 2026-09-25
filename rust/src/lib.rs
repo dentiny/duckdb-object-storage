@@ -17,6 +17,7 @@ mod fs;
 mod io_metrics;
 mod keys;
 mod opendal_io_metrics_layer;
+mod read_coalescer;
 mod slatedb_object_store;
 mod util;
 

@@ -6,15 +6,19 @@ use std::ptr;
 use std::slice;
 use std::sync::{Arc, RwLock};
 
+use futures::future;
 use tokio::runtime::Runtime;
 
 use crate::cache::CacheConfig;
 use crate::error::{Error, Result};
 use crate::file_handle::FileHandle;
+use crate::file_metadata::DEFAULT_CHUNK_SIZE;
 use crate::flags::FileOpenFlags;
 use crate::fs::{S3StorageConfig, SlateDbAccessMode, SlateDbFileSystem};
+use crate::read_coalescer::{merge_read_requests, ReadCoalescer, ReadRequest};
 
 const DATABASE_PATH: &str = "duckdb-object-storage";
+const COALESCED_READ_SIZE: usize = DEFAULT_CHUNK_SIZE as usize;
 
 #[repr(C)]
 pub struct FfiOpenOptions {
@@ -143,11 +147,13 @@ pub struct FfiIoStats {
 pub struct FfiFileSystem {
     runtime: Arc<Runtime>,
     fs: SlateDbFileSystem,
+    coalesce_reads: bool,
 }
 
 pub struct FfiFileHandle {
     runtime: Arc<Runtime>,
     handle: RwLock<Option<Box<dyn FileHandle>>>,
+    read_coalescer: Option<ReadCoalescer>,
 }
 
 thread_local! {
@@ -367,6 +373,46 @@ fn create_runtime() -> Result<Arc<Runtime>> {
         .map_err(|source| Error::io_with_source("failed to initialize Tokio runtime", source))
 }
 
+fn execute_read_requests(
+    runtime: &Runtime,
+    file: &dyn FileHandle,
+    requests: &[ReadRequest],
+) -> Vec<Result<Vec<u8>>> {
+    let merged = match merge_read_requests(requests) {
+        Ok(merged) => merged,
+        Err(error) => return vec![Err(error); requests.len()],
+    };
+    let merged_results =
+        runtime.block_on(future::join_all(merged.iter().map(|range| async move {
+            let mut data = vec![0; range.len];
+            file.pread(&mut data, range.offset).await.map(|bytes_read| {
+                data.truncate(bytes_read);
+                data
+            })
+        })));
+    let mut results = vec![Ok(Vec::new()); requests.len()];
+
+    for (range, result) in merged.iter().zip(merged_results) {
+        match result {
+            Ok(data) => {
+                for &index in &range.request_indices {
+                    let request = requests[index];
+                    let relative = usize::try_from(request.offset - range.offset)
+                        .expect("request starts inside its merged range");
+                    let available = data.len().saturating_sub(relative).min(request.len);
+                    results[index] = Ok(data[relative..relative + available].to_vec());
+                }
+            }
+            Err(error) => {
+                for &index in &range.request_indices {
+                    results[index] = Err(error.clone());
+                }
+            }
+        }
+    }
+    results
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_fs_create_memory(
     cache_config: *const FfiCacheConfig,
@@ -384,7 +430,11 @@ pub unsafe extern "C" fn slatedb_fs_create_memory(
             cache_config,
             access_mode,
         ))?;
-        *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
+        *output = Box::into_raw(Box::new(FfiFileSystem {
+            runtime,
+            fs,
+            coalesce_reads: false,
+        }));
         Ok(())
     })
 }
@@ -412,7 +462,11 @@ pub unsafe extern "C" fn slatedb_fs_create_local(
             cache_config,
             access_mode,
         ))?;
-        *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
+        *output = Box::into_raw(Box::new(FfiFileSystem {
+            runtime,
+            fs,
+            coalesce_reads: false,
+        }));
         Ok(())
     })
 }
@@ -437,7 +491,11 @@ pub unsafe extern "C" fn slatedb_fs_create_s3(
             cache_config,
             access_mode,
         ))?;
-        *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
+        *output = Box::into_raw(Box::new(FfiFileSystem {
+            runtime,
+            fs,
+            coalesce_reads: true,
+        }));
         Ok(())
     })
 }
@@ -525,6 +583,7 @@ pub unsafe extern "C" fn slatedb_fs_open_file(
         *output = Box::into_raw(Box::new(FfiFileHandle {
             runtime: Arc::clone(&fs.runtime),
             handle: RwLock::new(Some(handle)),
+            read_coalescer: fs.coalesce_reads.then(ReadCoalescer::new),
         }));
         Ok(())
     })
@@ -605,6 +664,25 @@ pub unsafe extern "C" fn slatedb_file_pread(
             .ok_or_else(|| Error::invalid_argument("bytes read output must not be null"))?;
         *bytes_read = 0;
         let buffer = unsafe { read_buffer(buffer, len)? };
+        let handle_ref = unsafe { handle.as_ref() }
+            .ok_or_else(|| Error::invalid_argument("file handle pointer must not be null"))?;
+        if len == COALESCED_READ_SIZE {
+            if let Some(coalescer) = &handle_ref.read_coalescer {
+                let data = coalescer.read(ReadRequest { offset, len }, |requests| {
+                    match unsafe {
+                        with_shared_file_handle(handle, |runtime, file| {
+                            Ok(execute_read_requests(runtime, file, requests))
+                        })
+                    } {
+                        Ok(results) => results,
+                        Err(error) => vec![Err(error); requests.len()],
+                    }
+                })?;
+                buffer[..data.len()].copy_from_slice(&data);
+                *bytes_read = data.len();
+                return Ok(());
+            }
+        }
         *bytes_read = unsafe {
             with_shared_file_handle(handle, |runtime, file| {
                 runtime.block_on(file.pread(buffer, offset))
@@ -761,7 +839,74 @@ pub extern "C" fn slatedb_fs_name() -> *const c_char {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    #[derive(Debug)]
+    struct RecordingFile {
+        data: Vec<u8>,
+        reads: Mutex<Vec<(u64, usize)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl FileHandle for RecordingFile {
+        async fn pread(&self, buf: &mut [u8], offset: u64) -> Result<usize> {
+            self.reads.lock().unwrap().push((offset, buf.len()));
+            let offset = usize::try_from(offset).unwrap();
+            let available = self.data.len().saturating_sub(offset).min(buf.len());
+            buf[..available].copy_from_slice(&self.data[offset..offset + available]);
+            Ok(available)
+        }
+
+        async fn pwrite(&mut self, _data: &[u8], _offset: u64) -> Result<()> {
+            unreachable!()
+        }
+
+        async fn read(&mut self, _buf: &mut [u8]) -> Result<usize> {
+            unreachable!()
+        }
+
+        async fn write(&mut self, _data: &[u8]) -> Result<usize> {
+            unreachable!()
+        }
+
+        async fn sync(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn seek(&mut self, _position: u64) {}
+
+        fn seek_position(&self) -> u64 {
+            0
+        }
+
+        fn reset(&mut self) {}
+
+        fn file_size(&self) -> u64 {
+            self.data.len() as u64
+        }
+
+        async fn truncate(&mut self, _new_size: u64) -> Result<()> {
+            unreachable!()
+        }
+
+        fn get_last_modified_time(&self) -> u64 {
+            0
+        }
+
+        async fn close(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn file_id(&self) -> u64 {
+            1
+        }
+
+        fn flags(&self) -> FileOpenFlags {
+            FileOpenFlags::read_only()
+        }
+    }
 
     fn database_config(read_only: bool) -> FfiDatabaseConfig {
         FfiDatabaseConfig {
@@ -831,6 +976,32 @@ mod tests {
             expect_ok(slatedb_fs_file_exists(fs, path.as_ptr(), &mut exists));
         }
         exists != 0
+    }
+
+    #[test]
+    fn coalesced_reads_use_one_underlying_read_per_adjacent_range() {
+        let runtime = create_runtime().unwrap();
+        let file = RecordingFile {
+            data: (0..64).collect(),
+            reads: Mutex::new(Vec::new()),
+        };
+        let requests = [
+            ReadRequest { offset: 4, len: 8 },
+            ReadRequest { offset: 12, len: 8 },
+            ReadRequest { offset: 40, len: 4 },
+        ];
+
+        let results = execute_read_requests(&runtime, &file, &requests)
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(results[0], (4..12).collect::<Vec<_>>());
+        assert_eq!(results[1], (12..20).collect::<Vec<_>>());
+        assert_eq!(results[2], (40..44).collect::<Vec<_>>());
+
+        let mut reads = file.reads.lock().unwrap().clone();
+        reads.sort_unstable();
+        assert_eq!(reads, vec![(4, 16), (40, 4)]);
     }
 
     #[test]
