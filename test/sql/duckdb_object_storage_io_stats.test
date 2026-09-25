@@ -34,7 +34,7 @@ SELECT operation,
         END)::VARCHAR,
        (average_latency_ms >= 0)::VARCHAR,
        (stddev_latency_ms >= 0)::VARCHAR,
-       (CASE WHEN operation IN ('read', 'write') THEN bytes > 0 ELSE bytes = 0 END)::VARCHAR
+       (CASE WHEN operation IN ('read', 'write') THEN bytes > 0 ELSE bytes IS NULL END)::VARCHAR
 FROM duckdb_objfs_io_stats()
 ----
 delete	true	true	true	true

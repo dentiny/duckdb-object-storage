@@ -110,7 +110,7 @@ void IoStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &outp
 		output.SetValue(1, count, Value::UBIGINT(request_count));
 		output.SetValue(2, count, Value::DOUBLE(average_ms));
 		output.SetValue(3, count, Value::DOUBLE(stddev_ms));
-		output.SetValue(4, count, Value::UBIGINT(bytes));
+		output.SetValue(4, count, state.offset < 2 ? Value::UBIGINT(bytes) : Value());
 		state.offset++;
 		count++;
 	}
