@@ -348,13 +348,12 @@ def s3_prefix_size(bucket, prefix, profile, region):
             "--region",
             region,
             "--query",
-            "sum(Contents[].Size)",
+            "Contents[].Size",
             "--output",
-            "text",
+            "json",
         ]
     )
-    value = process.stdout.strip()
-    return int(value) if value not in {"", "None"} else 0
+    return sum(json.loads(process.stdout) or [])
 
 
 def run_remote_case(
