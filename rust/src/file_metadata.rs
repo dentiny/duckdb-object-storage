@@ -8,6 +8,10 @@ use crate::util::current_time_millis;
 /// Matches DuckDB's `DEFAULT_BLOCK_ALLOC_SIZE` of 262144.
 pub(crate) const DEFAULT_CHUNK_SIZE: u64 = 256 * 1024;
 
+/// Matches DuckDB's `SingleFileBlockManager::BLOCK_START`, so each block
+/// fills exactly one chunk.
+pub(crate) const DEFAULT_CHUNK_BASE_OFFSET: u64 = 3 * 4096;
+
 include!(concat!(env!("OUT_DIR"), "/slatefs.rs"));
 
 impl FileMetadata {
@@ -16,6 +20,7 @@ impl FileMetadata {
             size: 0,
             modified_at_ms: current_time_millis(),
             chunk_size: DEFAULT_CHUNK_SIZE,
+            chunk_base_offset: DEFAULT_CHUNK_BASE_OFFSET,
         }
     }
 
@@ -41,8 +46,15 @@ impl FileMetadata {
         if self.chunk_size == 0 {
             return Err(invalid("must be non-zero".to_string()));
         }
-        usize::try_from(self.chunk_size)
-            .map_err(|_| invalid(format!("{} exceeds usize", self.chunk_size)))
+        let chunk_size = usize::try_from(self.chunk_size)
+            .map_err(|_| invalid(format!("{} exceeds usize", self.chunk_size)))?;
+        if self.chunk_base_offset >= self.chunk_size {
+            return Err(Error::invalid_argument(format!(
+                "invalid chunk base offset for file_id {file_id}: {} must be less than {}",
+                self.chunk_base_offset, self.chunk_size
+            )));
+        }
+        Ok(chunk_size)
     }
 }
 
@@ -57,6 +69,7 @@ mod tests {
             size: 8192,
             modified_at_ms: 1_234_567_890,
             chunk_size: DEFAULT_CHUNK_SIZE,
+            chunk_base_offset: DEFAULT_CHUNK_BASE_OFFSET,
         };
 
         let decoded = FileMetadata::decode_from_bytes(&metadata.encode_to_bytes())
@@ -80,6 +93,7 @@ mod tests {
 
         assert_eq!(metadata.size, 0);
         assert_eq!(metadata.chunk_size, DEFAULT_CHUNK_SIZE);
+        assert_eq!(metadata.chunk_base_offset, DEFAULT_CHUNK_BASE_OFFSET);
         assert!(metadata.modified_at_ms > 0);
         assert_eq!(
             metadata.validated_chunk_size(7).expect("chunk size"),
@@ -93,6 +107,7 @@ mod tests {
             size: 0,
             modified_at_ms: 0,
             chunk_size: 0,
+            chunk_base_offset: 0,
         };
 
         let error = metadata
@@ -101,5 +116,12 @@ mod tests {
 
         assert!(matches!(error, Error::InvalidArgument(_)));
         assert!(error.to_string().contains("file_id 7: must be non-zero"));
+    }
+
+    #[test]
+    fn oversized_chunk_base_offset_is_rejected() {
+        let mut metadata = FileMetadata::new();
+        metadata.chunk_base_offset = metadata.chunk_size;
+        assert!(metadata.validated_chunk_size(7).is_err());
     }
 }

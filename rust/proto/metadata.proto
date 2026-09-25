@@ -10,4 +10,7 @@ message FileMetadata {
   uint64 modified_at_ms = 2;
   // Size of each chunk in bytes.
   uint64 chunk_size = 3;
+  // Offset of the first full chunk; chunk 0 holds the bytes before it. Zero
+  // for files written before this field existed.
+  uint64 chunk_base_offset = 4;
 }

@@ -149,7 +149,7 @@ impl SlateFileHandle {
             position,
             size: metadata.size,
             modified_at_ms: metadata.modified_at_ms,
-            chunks: ChunkManager::new(store, file_id, chunk_size),
+            chunks: ChunkManager::new(store, file_id, chunk_size, metadata.chunk_base_offset),
             metadata_dirty: false,
             flags,
         })
@@ -165,6 +165,7 @@ impl SlateFileHandle {
             size: self.size,
             modified_at_ms: self.modified_at_ms,
             chunk_size: self.chunks.chunk_size(),
+            chunk_base_offset: self.chunks.chunk_base_offset(),
         }
     }
 
@@ -341,6 +342,7 @@ mod tests {
             size: 0,
             modified_at_ms: 1,
             chunk_size: SMALL_CHUNK,
+            chunk_base_offset: 0,
         }
     }
 

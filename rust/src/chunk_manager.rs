@@ -38,15 +38,22 @@ pub(crate) struct ChunkManager {
     store: Arc<dyn ChunkStore>,
     file_id: u64,
     chunk_size: usize,
+    chunk_base_offset: u64,
     pending: BTreeMap<u64, PendingChunk>,
 }
 
 impl ChunkManager {
-    pub(crate) fn new(store: Arc<dyn ChunkStore>, file_id: u64, chunk_size: usize) -> Self {
+    pub(crate) fn new(
+        store: Arc<dyn ChunkStore>,
+        file_id: u64,
+        chunk_size: usize,
+        chunk_base_offset: u64,
+    ) -> Self {
         Self {
             store,
             file_id,
             chunk_size,
+            chunk_base_offset,
             pending: BTreeMap::new(),
         }
     }
@@ -54,6 +61,11 @@ impl ChunkManager {
     /// Bytes per chunk, as recorded in the file's metadata.
     pub(crate) fn chunk_size(&self) -> u64 {
         self.chunk_size as u64
+    }
+
+    /// Offset of the first full chunk, as recorded in the file's metadata.
+    pub(crate) fn chunk_base_offset(&self) -> u64 {
+        self.chunk_base_offset
     }
 
     /// Whether a sync has anything to write.
@@ -124,9 +136,8 @@ impl ChunkManager {
             return Ok(());
         }
 
-        let last_byte = new_size - 1;
-        let last_chunk = last_byte / self.chunk_size();
-        let last_len = usize::try_from((last_byte % self.chunk_size()) + 1).unwrap();
+        let last_byte = &self.split_into_chunks(1, new_size - 1)[0];
+        let (last_chunk, last_len) = (last_byte.chunk_idx, last_byte.chunk_offset + 1);
 
         // Read before mutating, so a failed truncation keeps the staged writes.
         let shortened_last_chunk = if self.pending.contains_key(&last_chunk) {
@@ -175,16 +186,33 @@ impl ChunkManager {
     }
 
     /// Split the `len` bytes at `offset` into per-chunk slices.
+    ///
+    /// Chunk boundaries sit on `chunk_base_offset + k * chunk_size`, so chunk
+    /// 0 is short and holds only the bytes before the base offset.
     fn split_into_chunks(&self, len: usize, offset: u64) -> Vec<ChunkSlice> {
         let mut slices = Vec::new();
         let mut covered = 0usize;
 
         while covered < len {
-            let current_offset = offset + covered as u64;
-            let chunk_offset = usize::try_from(current_offset % self.chunk_size()).unwrap();
-            let slice_len = (len - covered).min(self.chunk_size - chunk_offset);
+            let position = offset + covered as u64;
+            let (chunk_idx, chunk_offset, available) = if position < self.chunk_base_offset {
+                (
+                    0,
+                    usize::try_from(position).unwrap(),
+                    usize::try_from(self.chunk_base_offset - position).unwrap(),
+                )
+            } else {
+                let aligned = position - self.chunk_base_offset;
+                let chunk_offset = usize::try_from(aligned % self.chunk_size()).unwrap();
+                (
+                    aligned / self.chunk_size() + u64::from(self.chunk_base_offset != 0),
+                    chunk_offset,
+                    self.chunk_size - chunk_offset,
+                )
+            };
+            let slice_len = (len - covered).min(available);
             slices.push(ChunkSlice {
-                chunk_idx: current_offset / self.chunk_size(),
+                chunk_idx,
                 buf_offset: covered,
                 chunk_offset,
                 len: slice_len,
@@ -376,7 +404,7 @@ mod tests {
 
         fn manager(&self, file_id: u64) -> ChunkManager {
             let store = Arc::new(SlateDbChunkStore::new(Arc::clone(&self.db)));
-            ChunkManager::new(store, file_id, SMALL_CHUNK)
+            ChunkManager::new(store, file_id, SMALL_CHUNK, 0)
         }
 
         /// A manager whose store can be made to fail.
@@ -386,6 +414,7 @@ mod tests {
                 Arc::clone(&store) as Arc<dyn ChunkStore>,
                 file_id,
                 SMALL_CHUNK,
+                0,
             );
             (manager, store)
         }
@@ -431,6 +460,29 @@ mod tests {
             scan_read_ahead_bytes(0, u64::MAX, usize::MAX),
             MAX_SCAN_READ_AHEAD_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn base_offset_starts_full_chunks_after_it() {
+        let fixture = TestDb::new().await;
+        let store = Arc::new(SlateDbChunkStore::new(Arc::clone(&fixture.db)));
+        // Chunk 0 is [0, 3), chunk 1 is [3, 11), chunk 2 is [11, 19).
+        let mut manager = ChunkManager::new(store, 9, SMALL_CHUNK, 3);
+
+        let block = manager.split_into_chunks(SMALL_CHUNK, 11);
+        assert_eq!(block.len(), 1);
+        assert_eq!((block[0].chunk_idx, block[0].chunk_offset), (2, 0));
+
+        manager.write(b"hdrABCDEFGHabcdefgh", 0).await.unwrap();
+        flush(&mut manager, &fixture.db).await;
+        assert_eq!(read_to_vec(&manager, 4, 9).await, b"GHab");
+
+        manager.truncate(5).await.unwrap();
+        flush(&mut manager, &fixture.db).await;
+        assert_eq!(read_to_vec(&manager, 7, 0).await, b"hdrAB\0\0");
+
+        drop(manager);
+        fixture.close().await;
     }
 
     #[tokio::test]
