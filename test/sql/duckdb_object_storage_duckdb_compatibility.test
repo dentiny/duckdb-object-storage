@@ -1,0 +1,206 @@
+# name: test/sql/duckdb_object_storage_duckdb_compatibility.test
+# description: Counterparts for DuckDB tests whose default-catalog assumptions do not apply to ObjFS
+# group: [sql]
+
+require duckdb_object_storage
+
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
+
+# Use the latest DuckDB storage format so recently added persistent types such
+# as VARIANT are supported by the attached database.
+statement ok
+ATTACH 'duckdb_objfs://compat-source.db' AS source (STORAGE_VERSION 'latest')
+
+statement ok
+CREATE TABLE source.variant_values(id INTEGER PRIMARY KEY, payload VARIANT)
+
+statement ok
+INSERT INTO source.variant_values
+VALUES (1, {'k': 10}::VARIANT), (2, {'k': 20}::VARIANT)
+
+query I rowsort
+SELECT (payload::STRUCT(k INTEGER)).k
+FROM source.variant_values
+----
+10
+20
+
+# Exercise generated columns, sequences and table macros before copying the
+# complete catalog to a second ObjFS database.
+statement ok
+CREATE TABLE source.generated_values(x INTEGER, y AS (x + 100))
+
+statement ok
+INSERT INTO source.generated_values VALUES (1), (2)
+
+statement ok
+USE source
+
+statement ok
+CREATE SEQUENCE compat_sequence START 1
+
+statement ok
+CREATE TABLE sequence_values(
+    id INTEGER DEFAULT nextval('compat_sequence')
+)
+
+statement ok
+INSERT INTO sequence_values VALUES (DEFAULT), (DEFAULT)
+
+statement ok
+CREATE MACRO up_to(max_x) AS TABLE
+    SELECT x, y FROM generated_values WHERE x <= max_x
+
+statement ok
+USE memory
+
+statement ok
+ATTACH 'duckdb_objfs://compat-copy.db' AS copied (STORAGE_VERSION 'latest')
+
+statement ok
+COPY FROM DATABASE source TO copied
+
+query II rowsort
+SELECT x, y FROM copied.generated_values
+----
+1	101
+2	102
+
+query I
+SELECT count(*)
+FROM duckdb_functions()
+WHERE database_name = 'copied'
+  AND function_name = 'up_to'
+  AND function_type = 'table_macro'
+----
+1
+
+statement ok
+USE copied
+
+query II
+SELECT * FROM up_to(1)
+----
+1	101
+
+statement ok
+INSERT INTO sequence_values VALUES (DEFAULT)
+
+statement ok
+USE memory
+
+query I rowsort
+SELECT id FROM copied.sequence_values
+----
+1
+2
+3
+
+query I
+SELECT (payload::STRUCT(k INTEGER)).k
+FROM copied.variant_values
+WHERE id = 2
+----
+20
+
+# Metadata functions return one row per attached database. Filter by catalog
+# instead of assuming that the process contains only one database.
+query I
+SELECT count(*)
+FROM duckdb_databases()
+WHERE database_name = 'source'
+  AND path = 'duckdb_objfs://compat-source.db'
+  AND NOT readonly
+----
+1
+
+query I
+SELECT count(*)
+FROM pragma_database_size()
+WHERE database_name = 'source'
+----
+1
+
+# Verify ART persistence and snapshot isolation while a concurrent connection
+# holds a transaction open.
+statement ok
+CREATE TABLE source.indexed_values AS
+SELECT i AS id, gen_random_uuid() AS payload
+FROM range(10000) AS values(i)
+
+statement ok
+CREATE UNIQUE INDEX source_payload_idx ON source.indexed_values(payload)
+
+statement ok
+CREATE TABLE source.concurrent_values(id INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO source.concurrent_values SELECT i FROM range(10) AS values(i)
+
+statement ok
+CHECKPOINT source
+
+statement ok reader
+BEGIN TRANSACTION
+
+query I reader
+SELECT count(*) FROM source.concurrent_values
+----
+10
+
+statement ok
+DROP TABLE source.concurrent_values
+
+query I reader
+SELECT count(*) FROM source.concurrent_values
+----
+10
+
+query I reader
+SELECT id FROM source.concurrent_values WHERE id = 5
+----
+5
+
+statement ok reader
+COMMIT
+
+statement ok
+CHECKPOINT source
+
+statement error
+SELECT * FROM source.concurrent_values
+----
+does not exist
+
+# Reopen the source database read-only and verify data, generated columns,
+# VARIANT values and index-backed data all survived the ObjFS checkpoint.
+statement ok
+DETACH copied
+
+statement ok
+DETACH source
+
+statement ok
+ATTACH 'duckdb_objfs://compat-source.db' AS source (READ_ONLY)
+
+query II rowsort
+SELECT x, y FROM source.generated_values
+----
+1	101
+2	102
+
+query I
+SELECT (payload::STRUCT(k INTEGER)).k
+FROM source.variant_values
+WHERE id = 1
+----
+10
+
+query I
+SELECT count(*) FROM source.indexed_values
+----
+10000
+
+statement ok
+DETACH source

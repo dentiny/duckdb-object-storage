@@ -1,0 +1,78 @@
+# name: test/sql/duckdb_object_storage_checkpoint_failure.test
+# description: Verify an interrupted DuckDB checkpoint remains recoverable through ObjFS
+# group: [sql]
+
+require duckdb_object_storage
+
+require no_alternative_verify
+
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
+
+statement ok
+PRAGMA disable_checkpoint_on_shutdown
+
+statement ok
+ATTACH 'duckdb_objfs://checkpoint-failure.db' AS failed_checkpoint
+
+statement ok
+PRAGMA wal_autocheckpoint = '1TB'
+
+statement ok
+CREATE TABLE failed_checkpoint.items(i INTEGER)
+
+statement ok
+INSERT INTO failed_checkpoint.items VALUES (1)
+
+statement ok
+CHECKPOINT failed_checkpoint
+
+statement ok
+INSERT INTO failed_checkpoint.items VALUES (2), (3)
+
+statement ok
+PRAGMA debug_checkpoint_abort = 'before_header'
+
+# An attached database reports an I/O error rather than invalidating the entire
+# DuckDB instance. The committed WAL remains durable.
+statement error
+CHECKPOINT failed_checkpoint
+----
+<REGEX>:IO Error.*Checkpoint aborted before header write.*checkpoint_abort flag.*
+
+query I
+SELECT 42
+----
+42
+
+statement error
+SELECT count(*) FROM failed_checkpoint.items
+----
+<REGEX>:.*[Dd]atabase.*has been invalidated.*
+
+restart
+
+statement ok
+SET duckdb_objfs_root = '__TEST_DIR___slatedb/{BASE_TEST_NAME}'
+
+statement ok
+SET debug_checkpoint_abort = 'none'
+
+statement ok
+ATTACH 'duckdb_objfs://checkpoint-failure.db' AS recovered
+
+query I
+SELECT count(*) FROM recovered.items
+----
+3
+
+query I
+SELECT sum(i) FROM recovered.items
+----
+6
+
+statement ok
+CHECKPOINT recovered
+
+statement ok
+DETACH recovered
