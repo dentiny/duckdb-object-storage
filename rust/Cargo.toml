@@ -20,8 +20,8 @@ anyhow = "1"
 async-trait = "0.1"
 futures = "0.3"
 object_store = "0.14"
-object_store_opendal = "=0.60.1"
-opendal = { version = "=0.59.2", default-features = false, features = ["executors-tokio", "http-transport-reqwest", "services-fs", "services-memory", "services-s3"] }
+object_store_opendal = "=0.60.2"
+opendal = { version = "=0.59.3", default-features = false, features = ["executors-tokio", "http-transport-reqwest", "services-fs", "services-memory", "services-s3"] }
 prost = "0.14"
 slatedb = { version = "0.16", default-features = false, features = ["foyer"] }
 slatedb-common = "0.16"
@@ -30,7 +30,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
 
 [dev-dependencies]
 hyper-util = { version = "0.1", features = ["server-auto", "http1", "http2", "tokio"] }
-s3s = "0.16"
-s3s-fs = "0.16"
+s3s = "0.17"
+s3s-fs = "0.17"
 tempfile = "3"
 tokio = { version = "1", features = ["net", "time"] }
