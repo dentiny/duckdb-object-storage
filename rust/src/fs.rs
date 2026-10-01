@@ -27,10 +27,6 @@ pub const NAME: &str = "SlateDBFileSystem";
 /// them onto each other, so they live in the database file's SlateDB.
 const DATABASE_COMPANION_SUFFIXES: [&str; 3] = [".wal", ".wal.checkpoint", ".wal.recovery"];
 
-/// Prefix DuckDB gives a file written by `COPY ... TO` before moving it onto
-/// its final name in the same directory.
-const COPY_TEMPORARY_PREFIX: &str = "tmp_";
-
 /// SlateDB-backed filesystem owner.
 ///
 /// Every database file gets its own SlateDB, shared with its companion files,
@@ -421,8 +417,9 @@ impl SlateDbFileSystem {
     }
 }
 
-/// Name of the database a logical file belongs to. A database file and its
-/// companion files share one SlateDB so DuckDB can move them onto each other.
+/// Name of the database a logical file belongs to. Known DuckDB companion
+/// files share a SlateDB with the path obtained by removing their suffix;
+/// every other path is its own group.
 fn database_group(path: &str) -> String {
     for suffix in DATABASE_COMPANION_SUFFIXES {
         if let Some(database) = path.strip_suffix(suffix) {
@@ -431,15 +428,7 @@ fn database_group(path: &str) -> String {
             }
         }
     }
-    let (directory, name) = match path.rsplit_once('/') {
-        Some((directory, name)) => (Some(directory), name),
-        None => (None, path),
-    };
-    match (directory, name.strip_prefix(COPY_TEMPORARY_PREFIX)) {
-        (_, Some("")) | (_, None) => path.to_string(),
-        (Some(directory), Some(target)) => format!("{directory}/{target}"),
-        (None, Some(target)) => target.to_string(),
-    }
+    path.to_string()
 }
 
 fn filesystem_closed() -> Error {
@@ -982,8 +971,11 @@ mod tests {
             ("database.db.wal.checkpoint", "database.db"),
             ("database.db.wal.recovery", "database.db"),
             ("dir/database.db.wal", "dir/database.db"),
-            ("tmp_data.csv", "data.csv"),
-            ("dir/tmp_data.csv", "dir/data.csv"),
+            ("database", "database"),
+            ("database.wal", "database"),
+            ("data.csv.wal", "data.csv"),
+            ("tmp_data.csv", "tmp_data.csv"),
+            ("dir/tmp_data.csv", "dir/tmp_data.csv"),
             (".wal", ".wal"),
             ("dir/.wal", "dir/.wal"),
             ("tmp_", "tmp_"),
