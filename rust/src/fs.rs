@@ -44,16 +44,10 @@ pub struct SlateDbFileSystem {
     pub(crate) io_metrics: Arc<IoMetrics>,
 }
 
-#[derive(Clone)]
-enum SlateDbReadHandle {
-    ReadWrite(Arc<Db>),
-    ReadOnly(Arc<DbReader>),
-}
-
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct SlateDbClient {
-    reader: Option<Arc<DbReader>>,
     read_write: Option<Arc<Db>>,
+    reader: Option<Arc<DbReader>>,
 }
 
 #[derive(Clone, Copy)]
@@ -230,41 +224,41 @@ impl SlateDbFileSystem {
             )?));
         }
 
-        match self.read_client(path).await? {
-            SlateDbReadHandle::ReadWrite(db) => {
-                let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&db))
-                    .open_file(path)
-                    .await?;
-                Ok(Box::new(SlateFileHandle::new(
-                    SlateFileClient::ReadWrite(db),
-                    file_id,
-                    metadata,
-                    flags,
-                )?))
-            }
-            SlateDbReadHandle::ReadOnly(reader) => {
-                let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&reader))
-                    .open_file(path)
-                    .await?;
-                Ok(Box::new(SlateFileHandle::new(
-                    SlateFileClient::ReadOnly(reader),
-                    file_id,
-                    metadata,
-                    flags,
-                )?))
-            }
+        let client = self.read_client(path).await?;
+        if let Some(db) = client.read_write {
+            let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&db))
+                .open_file(path)
+                .await?;
+            return Ok(Box::new(SlateFileHandle::new(
+                SlateFileClient::ReadWrite(db),
+                file_id,
+                metadata,
+                flags,
+            )?));
         }
+
+        let reader = client
+            .reader
+            .expect("read client must contain a reader or writer");
+        let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&reader))
+            .open_file(path)
+            .await?;
+        Ok(Box::new(SlateFileHandle::new(
+            SlateFileClient::ReadOnly(reader),
+            file_id,
+            metadata,
+            flags,
+        )?))
     }
 
     /// Returns whether a logical path is present in the database catalog.
     pub async fn file_exists(&self, path: &str) -> Result<bool> {
         match self.read_client(path).await {
-            Ok(SlateDbReadHandle::ReadWrite(db)) => {
-                DatabaseMetadata::new(db).file_exists(path).await
-            }
-            Ok(SlateDbReadHandle::ReadOnly(reader)) => {
-                DatabaseMetadata::new(reader).file_exists(path).await
-            }
+            Ok(client) => match (client.read_write, client.reader) {
+                (Some(db), _) => DatabaseMetadata::new(db).file_exists(path).await,
+                (None, Some(reader)) => DatabaseMetadata::new(reader).file_exists(path).await,
+                (None, None) => unreachable!("read client must contain a reader or writer"),
+            },
             Err(Error::FileNotFound(_)) => Ok(false),
             Err(error) => Err(error),
         }
@@ -321,27 +315,26 @@ impl SlateDbFileSystem {
     /// Returns a non-fencing client for the database `path` belongs to, opening
     /// a reader on first use. An existing writer is reused so reads see this
     /// process's writes.
-    async fn read_client(&self, path: &str) -> Result<SlateDbReadHandle> {
+    async fn read_client(&self, path: &str) -> Result<SlateDbClient> {
         if self.closed {
             return Err(filesystem_closed());
         }
         let group = database_group(path);
         let mut databases = self.databases.lock().await;
-        if let Some(clients) = databases.get(&group) {
-            if let Some(db) = &clients.read_write {
-                return Ok(SlateDbReadHandle::ReadWrite(Arc::clone(db)));
-            }
-            if let Some(reader) = &clients.reader {
-                return Ok(SlateDbReadHandle::ReadOnly(Arc::clone(reader)));
-            }
+        if let Some(client) = databases.get(&group) {
+            return Ok(client.clone());
         }
 
         let reader = self
             .open_reader(&group)
             .await?
             .ok_or_else(|| Error::file_not_found(path))?;
-        databases.entry(group).or_default().reader = Some(Arc::clone(&reader));
-        Ok(SlateDbReadHandle::ReadOnly(reader))
+        let client = SlateDbClient {
+            read_write: None,
+            reader: Some(reader),
+        };
+        databases.insert(group, client.clone());
+        Ok(client)
     }
 
     /// Returns the writer for the database `path` belongs to, opening it on
