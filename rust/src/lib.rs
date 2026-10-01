@@ -18,6 +18,8 @@ mod io_metrics;
 mod keys;
 mod opendal_io_metrics_layer;
 mod slatedb_object_store;
+#[cfg(test)]
+mod test_utils;
 mod util;
 
 pub use cache::{CacheConfig, CacheStats};

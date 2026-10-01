@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use opendal::services::{Fs, Memory, S3};
 use opendal::Operator;
 use slatedb::config::{DbReaderOptions, Settings};
+use slatedb::db_cache::DbCache;
+use slatedb::object_store::ObjectStore;
 use slatedb::{Db, DbReader, DbReaderMode, ErrorKind as SlateDbErrorKind};
+use tokio::sync::Mutex;
 
 use crate::cache::{CacheConfig, CacheMetrics};
 use crate::database_metadata::DatabaseMetadata;
@@ -20,19 +24,32 @@ pub const PREFIX: &str = "duckdb_objfs:";
 /// Name reported to DuckDB via `FileSystem::GetName`.
 pub const NAME: &str = "SlateDBFileSystem";
 
+/// Suffixes of the files DuckDB keeps next to a database file. DuckDB moves
+/// them onto each other, so they live in the database file's SlateDB.
+const DATABASE_COMPANION_SUFFIXES: [&str; 3] = [".wal", ".wal.checkpoint", ".wal.recovery"];
+
 /// SlateDB-backed filesystem owner.
 ///
-/// One live database is kept for the lifetime of the filesystem. The FFI layer
-/// owns the runtime used to drive these asynchronous operations.
+/// Every database file gets its own SlateDB, shared with its companion files,
+/// so a writer only excludes other writers of the same file, as with DuckDB's
+/// file locks.
 pub struct SlateDbFileSystem {
-    client: Option<SlateDbClient>,
+    database_path: String,
+    object_store: Arc<dyn ObjectStore>,
+    cache_config: CacheConfig,
+    db_cache: Option<Arc<dyn DbCache>>,
+    access_mode: SlateDbAccessMode,
+    /// Keyed by `database_group`.
+    databases: Mutex<HashMap<String, Arc<Mutex<SlateDbClient>>>>,
+    closed: bool,
     pub(crate) cache_metrics: CacheMetrics,
     pub(crate) io_metrics: Arc<IoMetrics>,
 }
 
-enum SlateDbClient {
-    ReadWrite(Arc<Db>),
-    ReadOnly(Option<Arc<DbReader>>),
+#[derive(Clone, Default)]
+struct SlateDbClient {
+    read_write: Option<Arc<Db>>,
+    reader: Option<Arc<DbReader>>,
 }
 
 #[derive(Clone, Copy)]
@@ -86,56 +103,16 @@ impl SlateDbFileSystem {
 
         let io_metrics = Arc::new(IoMetrics::default());
         let operator = operator.layer(IoMetricsLayer::new(Arc::clone(&io_metrics)));
-        let object_store = Arc::new(SlateDbObjectStore::new(operator));
-        let cache_metrics = CacheMetrics::new();
         let db_cache = cache_config.build_db_cache();
-        let object_store_cache_options = cache_config.object_store_cache_options();
-        let client = match access_mode {
-            SlateDbAccessMode::ReadWrite => {
-                let settings = Settings {
-                    object_store_cache_options,
-                    ..Settings::default()
-                };
-                let mut builder = Db::builder(database_path, object_store)
-                    .with_settings(settings)
-                    .with_metrics_recorder(cache_metrics.recorder());
-                match db_cache {
-                    Some(cache) => builder = builder.with_db_cache(cache),
-                    None => builder = builder.with_db_cache_disabled(),
-                }
-                SlateDbClient::ReadWrite(Arc::new(builder.build().await?))
-            }
-            SlateDbAccessMode::ReadOnly => {
-                let options = DbReaderOptions {
-                    object_store_cache_options,
-                    ..DbReaderOptions::default()
-                };
-                let mut builder = DbReader::builder(database_path, object_store)
-                    .with_reader_mode(DbReaderMode::ManagedCheckpoint)
-                    .with_options(options)
-                    .with_metrics_recorder(cache_metrics.recorder());
-                match db_cache {
-                    Some(cache) => builder = builder.with_db_cache(cache),
-                    None => builder = builder.with_db_cache_disabled(),
-                }
-                let reader = match builder.build().await {
-                    Ok(reader) => Some(Arc::new(reader)),
-                    Err(error)
-                        if error.kind() == SlateDbErrorKind::Data
-                            && error
-                                .to_string()
-                                .contains("failed to find latest transactional object") =>
-                    {
-                        None
-                    }
-                    Err(error) => return Err(error.into()),
-                };
-                SlateDbClient::ReadOnly(reader)
-            }
-        };
         Ok(Self {
-            client: Some(client),
-            cache_metrics,
+            database_path: database_path.to_string(),
+            object_store: Arc::new(SlateDbObjectStore::new(operator)),
+            cache_config,
+            db_cache,
+            access_mode,
+            databases: Mutex::new(HashMap::new()),
+            closed: false,
+            cache_metrics: CacheMetrics::new(),
             io_metrics,
         })
     }
@@ -236,81 +213,133 @@ impl SlateDbFileSystem {
         flags: FileOpenFlags,
     ) -> Result<Box<dyn FileHandle + Send>> {
         flags.validate()?;
-        match self.client.as_ref().ok_or_else(filesystem_closed)? {
-            SlateDbClient::ReadWrite(db) => {
-                let db = Arc::clone(db);
-                let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&db))
-                    .prepare_file_for_open(path, flags.create, flags.truncate_existing)
-                    .await?;
-                Ok(Box::new(SlateFileHandle::new(
-                    SlateFileClient::ReadWrite(db),
-                    file_id,
-                    metadata,
-                    flags,
-                )?))
-            }
-            SlateDbClient::ReadOnly(reader) => {
-                if flags.write || flags.create || flags.append || flags.truncate_existing {
-                    return Err(read_only_violation("open a writable file"));
-                }
-                let reader =
-                    Arc::clone(reader.as_ref().ok_or_else(|| Error::file_not_found(path))?);
-                let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&reader))
-                    .open_file(path)
-                    .await?;
-                Ok(Box::new(SlateFileHandle::new(
-                    SlateFileClient::ReadOnly(reader),
-                    file_id,
-                    metadata,
-                    flags,
-                )?))
-            }
+        if flags.write {
+            self.open_write_handle(path, flags).await
+        } else {
+            self.open_read_handle(path, flags).await
         }
+    }
+
+    async fn open_write_handle(
+        &self,
+        path: &str,
+        flags: FileOpenFlags,
+    ) -> Result<Box<dyn FileHandle + Send>> {
+        let db = self
+            .write_db(path, flags.create, "open a writable file")
+            .await?;
+        let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&db))
+            .prepare_file_for_open(path, flags.create, flags.truncate_existing)
+            .await?;
+        Ok(Box::new(SlateFileHandle::new(
+            SlateFileClient::ReadWrite(db),
+            file_id,
+            metadata,
+            flags,
+        )?))
+    }
+
+    async fn open_read_handle(
+        &self,
+        path: &str,
+        flags: FileOpenFlags,
+    ) -> Result<Box<dyn FileHandle + Send>> {
+        let client = self.read_client(path).await?;
+        if let Some(db) = client.read_write {
+            let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&db))
+                .open_file(path)
+                .await?;
+            return Ok(Box::new(SlateFileHandle::new(
+                SlateFileClient::ReadWrite(db),
+                file_id,
+                metadata,
+                flags,
+            )?));
+        }
+
+        let reader = client
+            .reader
+            .expect("read client must contain a reader or writer");
+        let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&reader))
+            .open_file(path)
+            .await?;
+        Ok(Box::new(SlateFileHandle::new(
+            SlateFileClient::ReadOnly(reader),
+            file_id,
+            metadata,
+            flags,
+        )?))
     }
 
     /// Returns whether a logical path is present in the database catalog.
     pub async fn file_exists(&self, path: &str) -> Result<bool> {
-        match self.client.as_ref().ok_or_else(filesystem_closed)? {
-            SlateDbClient::ReadWrite(db) => {
-                DatabaseMetadata::new(Arc::clone(db))
-                    .file_exists(path)
-                    .await
-            }
-            SlateDbClient::ReadOnly(Some(reader)) => {
-                DatabaseMetadata::new(Arc::clone(reader))
-                    .file_exists(path)
-                    .await
-            }
-            SlateDbClient::ReadOnly(None) => Ok(false),
+        match self.read_client(path).await {
+            Ok(client) => match (client.read_write, client.reader) {
+                (Some(db), _) => DatabaseMetadata::new(db).file_exists(path).await,
+                (None, Some(reader)) => DatabaseMetadata::new(reader).file_exists(path).await,
+                (None, None) => unreachable!("read client must contain a reader or writer"),
+            },
+            Err(Error::FileNotFound(_)) => Ok(false),
+            Err(error) => Err(error),
         }
     }
 
     /// Atomically removes a logical file and all of its persisted state.
     pub async fn remove_file(&self, path: &str) -> Result<()> {
-        let db = self.read_write_db("remove a file")?;
+        let db = self.write_db(path, false, "remove a file").await?;
         DatabaseMetadata::new(db).remove_file(path).await
     }
 
-    /// Atomically moves a logical file, replacing the destination if present.
+    /// Atomically moves a logical file within its database, replacing the
+    /// destination if present.
     pub async fn move_file(&self, source: &str, target: &str) -> Result<()> {
-        let db = self.read_write_db("move a file")?;
+        if database_group(source) != database_group(target) {
+            return Err(Error::invalid_argument(format!(
+                "cannot move '{source}' to '{target}': files of different databases are stored separately"
+            )));
+        }
+        let db = self.write_db(source, false, "move a file").await?;
         DatabaseMetadata::new(db).move_file(source, target).await
     }
 
-    /// Flush and close the owned database.
+    /// Flush and close every open database.
     ///
     /// Calling `close` more than once is harmless. SlateDB marks all clones of
-    /// the database closed.
+    /// a database closed.
     pub async fn close(&mut self) -> Result<()> {
-        let Some(client) = self.client.take() else {
-            return Ok(());
-        };
-        match client {
-            SlateDbClient::ReadWrite(db) => db.close().await?,
-            SlateDbClient::ReadOnly(Some(reader)) => reader.close().await?,
-            SlateDbClient::ReadOnly(None) => {}
+        self.closed = true;
+        let mut result = Ok(());
+        for client in std::mem::take(self.databases.get_mut()).into_values() {
+            let client = {
+                let mut client = client.lock().await;
+                std::mem::take(&mut *client)
+            };
+            if let Some(db) = client.read_write {
+                if let (Ok(()), Err(error)) = (&result, db.close().await) {
+                    result = Err(error.into());
+                }
+            }
+            if let Some(reader) = client.reader {
+                if let (Ok(()), Err(error)) = (&result, reader.close().await) {
+                    result = Err(error.into());
+                }
+            }
         }
-        Ok(())
+        if let Some(cache) = self.db_cache.take() {
+            if let (Ok(()), Err(error)) = (&result, cache.close().await) {
+                result = Err(error.into());
+            }
+        }
+        result
+    }
+
+    async fn client_for_group(&self, group: &str) -> Arc<Mutex<SlateDbClient>> {
+        let mut databases = self.databases.lock().await;
+        Arc::clone(
+            databases
+                .entry(group.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(SlateDbClient::default()))),
+        )
     }
 
     pub fn name(&self) -> &'static str {
@@ -321,12 +350,124 @@ impl SlateDbFileSystem {
         path.starts_with(PREFIX)
     }
 
-    fn read_write_db(&self, operation: &str) -> Result<Arc<Db>> {
-        match self.client.as_ref().ok_or_else(filesystem_closed)? {
-            SlateDbClient::ReadWrite(db) => Ok(Arc::clone(db)),
-            SlateDbClient::ReadOnly(_) => Err(read_only_violation(operation)),
+    /// Returns a non-fencing client for the database `path` belongs to, opening
+    /// a reader on first use. An existing writer is reused so reads see this
+    /// process's writes.
+    async fn read_client(&self, path: &str) -> Result<SlateDbClient> {
+        if self.closed {
+            return Err(filesystem_closed());
+        }
+        let group = database_group(path);
+        let client = self.client_for_group(&group).await;
+        let mut client = client.lock().await;
+        if client.read_write.is_some() || client.reader.is_some() {
+            return Ok(client.clone());
+        }
+
+        let reader = self
+            .open_reader(&group)
+            .await?
+            .ok_or_else(|| Error::file_not_found(path))?;
+        client.reader = Some(reader);
+        Ok(client.clone())
+    }
+
+    /// Returns the writer for the database `path` belongs to, opening it on
+    /// first use. Opening a writer creates a SlateDB, so non-creating operations
+    /// first open a reader to verify that the database exists.
+    async fn write_db(&self, path: &str, create: bool, operation: &str) -> Result<Arc<Db>> {
+        if self.closed {
+            return Err(filesystem_closed());
+        }
+        if matches!(self.access_mode, SlateDbAccessMode::ReadOnly) {
+            return Err(read_only_violation(operation));
+        }
+
+        let group = database_group(path);
+        let client = self.client_for_group(&group).await;
+        let mut client = client.lock().await;
+        if let Some(db) = &client.read_write {
+            return Ok(Arc::clone(db));
+        }
+
+        if !create && client.reader.is_none() {
+            let reader = self
+                .open_reader(&group)
+                .await?
+                .ok_or_else(|| Error::file_not_found(path))?;
+            client.reader = Some(reader);
+        }
+
+        let db = self.open_writer(&group).await?;
+        client.read_write = Some(Arc::clone(&db));
+        Ok(db)
+    }
+
+    /// For example, group `dir/database.db` under `root` is stored at
+    /// `root/dir%2Fdatabase.db`.
+    fn slatedb_path(&self, group: &str) -> String {
+        // Flatten the group so one database's SlateDB never nests inside another's.
+        let group = group.replace('%', "%25").replace('/', "%2F");
+        format!("{}/{group}", self.database_path)
+    }
+
+    async fn open_writer(&self, group: &str) -> Result<Arc<Db>> {
+        let settings = Settings {
+            object_store_cache_options: self.cache_config.object_store_cache_options(),
+            ..Settings::default()
+        };
+        let mut builder = Db::builder(self.slatedb_path(group), Arc::clone(&self.object_store))
+            .with_settings(settings)
+            .with_metrics_recorder(self.cache_metrics.recorder());
+        match &self.db_cache {
+            Some(cache) => builder = builder.with_db_cache(Arc::clone(cache)),
+            None => builder = builder.with_db_cache_disabled(),
+        }
+        Ok(Arc::new(builder.build().await?))
+    }
+
+    /// Returns `None` if the database has never been written.
+    async fn open_reader(&self, group: &str) -> Result<Option<Arc<DbReader>>> {
+        let options = DbReaderOptions {
+            object_store_cache_options: self.cache_config.object_store_cache_options(),
+            ..DbReaderOptions::default()
+        };
+        let mut builder =
+            DbReader::builder(self.slatedb_path(group), Arc::clone(&self.object_store))
+                .with_reader_mode(DbReaderMode::ManagedCheckpoint)
+                .with_options(options)
+                .with_metrics_recorder(self.cache_metrics.recorder());
+        match &self.db_cache {
+            Some(cache) => builder = builder.with_db_cache(Arc::clone(cache)),
+            None => builder = builder.with_db_cache_disabled(),
+        }
+        match builder.build().await {
+            Ok(reader) => Ok(Some(Arc::new(reader))),
+            Err(error)
+                if error.kind() == SlateDbErrorKind::Data
+                    && error
+                        .to_string()
+                        .contains("failed to find latest transactional object") =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
         }
     }
+}
+
+/// Name of the database a logical file belongs to. Known DuckDB companion
+/// files share a SlateDB with the path obtained by removing their suffix;
+/// every other path is its own group.
+fn database_group(path: &str) -> String {
+    for suffix in DATABASE_COMPANION_SUFFIXES {
+        if let Some(database) = path.strip_suffix(suffix) {
+            if !database.is_empty() && !database.ends_with('/') {
+                return database.to_string();
+            }
+        }
+    }
+    path.to_string()
 }
 
 fn filesystem_closed() -> Error {
@@ -407,6 +548,7 @@ mod tests {
 
     use super::*;
     use crate::keys;
+    use crate::test_utils::{open_local_fs, read_file, write_file};
 
     const S3_ACCESS_KEY: &str = "test-access-key";
     const S3_BUCKET: &str = "test-bucket";
@@ -471,7 +613,8 @@ mod tests {
             .open_file("other.db", FileOpenFlags::open_or_create())
             .await
             .expect("create second file");
-        assert_eq!(other.file_id(), 2);
+        // Another database has its own SlateDB and file ids.
+        assert_eq!(other.file_id(), 1);
         other.close().await.expect("close second file");
         drop(other);
 
@@ -490,6 +633,43 @@ mod tests {
         drop(reopened);
 
         fs.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn close_is_idempotent() {
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
+        write_file(&fs, "database.db", b"contents").await;
+
+        fs.close().await.expect("first close");
+        fs.close().await.expect("second close");
+    }
+
+    #[tokio::test]
+    async fn reader_remains_usable_after_opening_writer() {
+        let root = tempdir().expect("temporary object-store root");
+        let mut seed = open_local_fs("test-db", root.path()).await;
+        write_file(&seed, "database.db", b"contents").await;
+        seed.close().await.expect("close seed filesystem");
+
+        let mut fs = open_local_fs("test-db", root.path()).await;
+        let reader = fs
+            .open_file("database.db", FileOpenFlags::read_only())
+            .await
+            .expect("open reader");
+        let writer = fs
+            .open_file("database.db", FileOpenFlags::read_write())
+            .await
+            .expect("open writer");
+
+        let mut contents = [0; 8];
+        assert_eq!(reader.pread(&mut contents, 0).await.expect("read"), 8);
+        assert_eq!(&contents, b"contents");
+
+        drop(reader);
+        drop(writer);
+        fs.close().await.expect("close filesystem");
     }
 
     #[tokio::test]
@@ -566,11 +746,26 @@ mod tests {
         reopened.close().await.unwrap();
         drop(reopened);
 
-        second.move_file("database.db", "renamed.db").await.unwrap();
-        assert!(!second.file_exists("database.db").await.unwrap());
-        assert!(second.file_exists("renamed.db").await.unwrap());
-        second.remove_file("renamed.db").await.unwrap();
-        assert!(!second.file_exists("renamed.db").await.unwrap());
+        let mut checkpoint_wal = second
+            .open_file(
+                "database.db.wal.checkpoint",
+                FileOpenFlags::open_or_create(),
+            )
+            .await
+            .unwrap();
+        checkpoint_wal.close().await.unwrap();
+        drop(checkpoint_wal);
+        second
+            .move_file("database.db.wal.checkpoint", "database.db.wal")
+            .await
+            .unwrap();
+        assert!(!second
+            .file_exists("database.db.wal.checkpoint")
+            .await
+            .unwrap());
+        assert!(second.file_exists("database.db.wal").await.unwrap());
+        second.remove_file("database.db.wal").await.unwrap();
+        assert!(!second.file_exists("database.db.wal").await.unwrap());
         second.close().await.unwrap();
 
         server.abort();
@@ -665,7 +860,8 @@ mod tests {
         assert_eq!(replaced.file_id(), file_id);
         assert_eq!(replaced.file_size(), 0);
         assert!(fs
-            .read_write_db("inspect database")
+            .write_db("recovery.wal", false, "inspect database")
+            .await
             .expect("read-write database")
             .scan_prefix(keys::chunk_prefix(file_id), ..)
             .await
@@ -720,7 +916,8 @@ mod tests {
 
         let mut batch = WriteBatch::new();
         batch.delete(keys::metadata_key(file_id));
-        fs.read_write_db("inspect database")
+        fs.write_db("database.db", false, "inspect database")
+            .await
             .expect("read-write database")
             .write(batch)
             .await
@@ -749,7 +946,8 @@ mod tests {
 
         assert!(!fs.file_exists("database.db").await.expect("path lookup"));
         let db = fs
-            .read_write_db("inspect database")
+            .write_db("database.db", false, "inspect database")
+            .await
             .expect("read-write database");
         assert!(db
             .get(keys::metadata_key(file_id))
@@ -779,7 +977,10 @@ mod tests {
             .expect("filesystem");
 
         let mut source = fs
-            .open_file("source.db", FileOpenFlags::open_or_create())
+            .open_file(
+                "database.db.wal.checkpoint",
+                FileOpenFlags::open_or_create(),
+            )
             .await
             .expect("create source");
         let source_file_id = source.file_id();
@@ -788,7 +989,7 @@ mod tests {
         drop(source);
 
         let mut target = fs
-            .open_file("target.db", FileOpenFlags::open_or_create())
+            .open_file("database.db.wal", FileOpenFlags::open_or_create())
             .await
             .expect("create target");
         let replaced_file_id = target.file_id();
@@ -796,13 +997,16 @@ mod tests {
         target.close().await.expect("close target");
         drop(target);
 
-        fs.move_file("source.db", "target.db")
+        fs.move_file("database.db.wal.checkpoint", "database.db.wal")
             .await
             .expect("move file");
 
-        assert!(!fs.file_exists("source.db").await.expect("source lookup"));
+        assert!(!fs
+            .file_exists("database.db.wal.checkpoint")
+            .await
+            .expect("source lookup"));
         let mut moved = fs
-            .open_file("target.db", FileOpenFlags::read_only())
+            .open_file("database.db.wal", FileOpenFlags::read_only())
             .await
             .expect("open moved file");
         assert_eq!(moved.file_id(), source_file_id);
@@ -816,7 +1020,8 @@ mod tests {
         drop(moved);
 
         let db = fs
-            .read_write_db("inspect database")
+            .write_db("database.db", false, "inspect database")
+            .await
             .expect("read-write database");
         assert!(db
             .get(keys::metadata_key(replaced_file_id))
@@ -833,6 +1038,87 @@ mod tests {
             .is_none());
 
         fs.close().await.expect("close");
+    }
+
+    #[test]
+    fn database_group_keeps_companion_files_with_their_database() {
+        for (path, group) in [
+            ("database.db", "database.db"),
+            ("database.db.wal", "database.db"),
+            ("database.db.wal.checkpoint", "database.db"),
+            ("database.db.wal.recovery", "database.db"),
+            ("dir/database.db.wal", "dir/database.db"),
+            ("database", "database"),
+            ("database.wal", "database"),
+            ("data.csv.wal", "data.csv"),
+            ("tmp_data.csv", "tmp_data.csv"),
+            ("dir/tmp_data.csv", "dir/tmp_data.csv"),
+            (".wal", ".wal"),
+            ("dir/.wal", "dir/.wal"),
+            ("tmp_", "tmp_"),
+            ("dir/tmp_", "dir/tmp_"),
+        ] {
+            assert_eq!(database_group(path), group, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn move_file_rejects_moves_between_databases() {
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
+        let mut source = fs
+            .open_file("source.db", FileOpenFlags::open_or_create())
+            .await
+            .expect("create source");
+        source.close().await.expect("close source");
+        drop(source);
+
+        assert!(matches!(
+            fs.move_file("source.db", "target.db").await,
+            Err(Error::InvalidArgument(_))
+        ));
+        assert!(fs.file_exists("source.db").await.expect("source lookup"));
+
+        fs.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn writers_of_different_databases_share_a_root() {
+        let root = tempdir().expect("temporary object-store root");
+        let mut first = open_local_fs("shared-root", root.path()).await;
+        let mut second = open_local_fs("shared-root", root.path()).await;
+
+        write_file(&first, "a.db", b"a1").await;
+        write_file(&second, "b.db", b"b1").await;
+        write_file(&first, "a.db", b"a2").await;
+        write_file(&first, "a.db.wal", b"wal").await;
+        write_file(&second, "b.db", b"b2").await;
+
+        first.close().await.expect("close first");
+        second.close().await.expect("close second");
+
+        let mut reopened = open_local_fs("shared-root", root.path()).await;
+        assert_eq!(read_file(&reopened, "a.db", 2).await, b"a2");
+        assert_eq!(read_file(&reopened, "a.db.wal", 3).await, b"wal");
+        assert_eq!(read_file(&reopened, "b.db", 2).await, b"b2");
+        reopened.close().await.expect("close reopened");
+    }
+
+    #[tokio::test]
+    async fn reads_on_a_writable_filesystem_do_not_fence_the_writer() {
+        let root = tempdir().expect("temporary object-store root");
+        let mut writer = open_local_fs("shared-root", root.path()).await;
+        let mut reader = open_local_fs("shared-root", root.path()).await;
+
+        write_file(&writer, "a.db", b"before").await;
+        assert!(reader.file_exists("a.db").await.expect("exists"));
+        assert!(!reader.file_exists("a.db.wal").await.expect("missing wal"));
+        assert_eq!(read_file(&reader, "a.db", 6).await, b"before");
+        write_file(&writer, "a.db", b"after!").await;
+
+        reader.close().await.expect("close reader");
+        writer.close().await.expect("close writer");
     }
 
     #[tokio::test]

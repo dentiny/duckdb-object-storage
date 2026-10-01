@@ -1054,8 +1054,8 @@ mod tests {
     fn ffi_file_exists_move_and_remove() {
         unsafe {
             let fs = create_fs();
-            let source = CString::new("source.db").unwrap();
-            let target = CString::new("target.db").unwrap();
+            let source = CString::new("database.db.wal.checkpoint").unwrap();
+            let target = CString::new("database.db.wal").unwrap();
             slatedb_file_destroy(open_file(fs, &source, &read_write_options()));
 
             assert!(file_exists(fs, &source));
