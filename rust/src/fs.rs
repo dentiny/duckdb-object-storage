@@ -40,7 +40,7 @@ pub struct SlateDbFileSystem {
     db_cache: Option<Arc<dyn DbCache>>,
     access_mode: SlateDbAccessMode,
     /// Keyed by `database_group`.
-    databases: Mutex<HashMap<String, SlateDbClient>>,
+    databases: Mutex<HashMap<String, Arc<Mutex<SlateDbClient>>>>,
     closed: bool,
     pub(crate) cache_metrics: CacheMetrics,
     pub(crate) io_metrics: Arc<IoMetrics>,
@@ -310,6 +310,10 @@ impl SlateDbFileSystem {
         self.closed = true;
         let mut result = Ok(());
         for client in std::mem::take(self.databases.get_mut()).into_values() {
+            let client = {
+                let mut client = client.lock().await;
+                std::mem::take(&mut *client)
+            };
             if let Some(db) = client.read_write {
                 if let (Ok(()), Err(error)) = (&result, db.close().await) {
                     result = Err(error.into());
@@ -329,6 +333,15 @@ impl SlateDbFileSystem {
         result
     }
 
+    async fn client_for_group(&self, group: &str) -> Arc<Mutex<SlateDbClient>> {
+        let mut databases = self.databases.lock().await;
+        Arc::clone(
+            databases
+                .entry(group.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(SlateDbClient::default()))),
+        )
+    }
+
     pub fn name(&self) -> &'static str {
         NAME
     }
@@ -345,8 +358,9 @@ impl SlateDbFileSystem {
             return Err(filesystem_closed());
         }
         let group = database_group(path);
-        let mut databases = self.databases.lock().await;
-        if let Some(client) = databases.get(&group) {
+        let client = self.client_for_group(&group).await;
+        let mut client = client.lock().await;
+        if client.read_write.is_some() || client.reader.is_some() {
             return Ok(client.clone());
         }
 
@@ -354,12 +368,8 @@ impl SlateDbFileSystem {
             .open_reader(&group)
             .await?
             .ok_or_else(|| Error::file_not_found(path))?;
-        let client = SlateDbClient {
-            read_write: None,
-            reader: Some(reader),
-        };
-        databases.insert(group, client.clone());
-        Ok(client)
+        client.reader = Some(reader);
+        Ok(client.clone())
     }
 
     /// Returns the writer for the database `path` belongs to, opening it on
@@ -374,27 +384,22 @@ impl SlateDbFileSystem {
         }
 
         let group = database_group(path);
-        let mut databases = self.databases.lock().await;
-        if let Some(db) = databases
-            .get(&group)
-            .and_then(|client| client.read_write.as_ref())
-        {
+        let client = self.client_for_group(&group).await;
+        let mut client = client.lock().await;
+        if let Some(db) = &client.read_write {
             return Ok(Arc::clone(db));
         }
 
-        let has_reader = databases
-            .get(&group)
-            .is_some_and(|client| client.reader.is_some());
-        if !create && !has_reader {
+        if !create && client.reader.is_none() {
             let reader = self
                 .open_reader(&group)
                 .await?
                 .ok_or_else(|| Error::file_not_found(path))?;
-            databases.entry(group.clone()).or_default().reader = Some(reader);
+            client.reader = Some(reader);
         }
 
         let db = self.open_writer(&group).await?;
-        databases.entry(group).or_default().read_write = Some(Arc::clone(&db));
+        client.read_write = Some(Arc::clone(&db));
         Ok(db)
     }
 
