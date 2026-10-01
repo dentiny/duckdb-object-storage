@@ -4,6 +4,7 @@ use std::sync::Arc;
 use opendal::services::{Fs, Memory, S3};
 use opendal::Operator;
 use slatedb::config::{DbReaderOptions, Settings};
+use slatedb::db_cache::DbCache;
 use slatedb::object_store::ObjectStore;
 use slatedb::{Db, DbReader, DbReaderMode, ErrorKind as SlateDbErrorKind};
 use tokio::sync::Mutex;
@@ -36,6 +37,7 @@ pub struct SlateDbFileSystem {
     database_path: String,
     object_store: Arc<dyn ObjectStore>,
     cache_config: CacheConfig,
+    db_cache: Option<Arc<dyn DbCache>>,
     access_mode: SlateDbAccessMode,
     /// Keyed by `database_group`.
     databases: Mutex<HashMap<String, SlateDbClient>>,
@@ -101,10 +103,12 @@ impl SlateDbFileSystem {
 
         let io_metrics = Arc::new(IoMetrics::default());
         let operator = operator.layer(IoMetricsLayer::new(Arc::clone(&io_metrics)));
+        let db_cache = cache_config.build_db_cache();
         Ok(Self {
             database_path: database_path.to_string(),
             object_store: Arc::new(SlateDbObjectStore::new(operator)),
             cache_config,
+            db_cache,
             access_mode,
             databases: Mutex::new(HashMap::new()),
             closed: false,
@@ -317,6 +321,11 @@ impl SlateDbFileSystem {
                 }
             }
         }
+        if let Some(cache) = self.db_cache.take() {
+            if let (Ok(()), Err(error)) = (&result, cache.close().await) {
+                result = Err(error.into());
+            }
+        }
         result
     }
 
@@ -405,9 +414,8 @@ impl SlateDbFileSystem {
         let mut builder = Db::builder(self.slatedb_path(group), Arc::clone(&self.object_store))
             .with_settings(settings)
             .with_metrics_recorder(self.cache_metrics.recorder());
-        // Block caches must not be shared: WAL SST ids, part of the cache key, repeat across SlateDBs.
-        match self.cache_config.build_db_cache() {
-            Some(cache) => builder = builder.with_db_cache(cache),
+        match &self.db_cache {
+            Some(cache) => builder = builder.with_db_cache(Arc::clone(cache)),
             None => builder = builder.with_db_cache_disabled(),
         }
         Ok(Arc::new(builder.build().await?))
@@ -424,8 +432,8 @@ impl SlateDbFileSystem {
                 .with_reader_mode(DbReaderMode::ManagedCheckpoint)
                 .with_options(options)
                 .with_metrics_recorder(self.cache_metrics.recorder());
-        match self.cache_config.build_db_cache() {
-            Some(cache) => builder = builder.with_db_cache(cache),
+        match &self.db_cache {
+            Some(cache) => builder = builder.with_db_cache(Arc::clone(cache)),
             None => builder = builder.with_db_cache_disabled(),
         }
         match builder.build().await {
