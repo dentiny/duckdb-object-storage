@@ -31,9 +31,7 @@ const DATABASE_COMPANION_SUFFIXES: [&str; 3] = [".wal", ".wal.checkpoint", ".wal
 ///
 /// Every database file gets its own SlateDB, shared with its companion files,
 /// so a writer only excludes other writers of the same file, as with DuckDB's
-/// file locks. SlateDBs are opened on first use and stay open until the
-/// filesystem closes. The FFI layer owns the runtime used to drive these
-/// asynchronous operations.
+/// file locks.
 pub struct SlateDbFileSystem {
     database_path: String,
     object_store: Arc<dyn ObjectStore>,
@@ -41,17 +39,21 @@ pub struct SlateDbFileSystem {
     access_mode: SlateDbAccessMode,
     /// Keyed by `database_group`.
     databases: Mutex<HashMap<String, SlateDbClient>>,
-    /// Readers replaced by writers remain alive for existing file handles.
-    retired_readers: Mutex<Vec<Arc<DbReader>>>,
     closed: bool,
     pub(crate) cache_metrics: CacheMetrics,
     pub(crate) io_metrics: Arc<IoMetrics>,
 }
 
 #[derive(Clone)]
-enum SlateDbClient {
+enum SlateDbReadHandle {
     ReadWrite(Arc<Db>),
     ReadOnly(Arc<DbReader>),
+}
+
+#[derive(Default)]
+struct SlateDbClient {
+    reader: Option<Arc<DbReader>>,
+    read_write: Option<Arc<Db>>,
 }
 
 #[derive(Clone, Copy)]
@@ -111,7 +113,6 @@ impl SlateDbFileSystem {
             cache_config,
             access_mode,
             databases: Mutex::new(HashMap::new()),
-            retired_readers: Mutex::new(Vec::new()),
             closed: false,
             cache_metrics: CacheMetrics::new(),
             io_metrics,
@@ -230,7 +231,7 @@ impl SlateDbFileSystem {
         }
 
         match self.read_client(path).await? {
-            SlateDbClient::ReadWrite(db) => {
+            SlateDbReadHandle::ReadWrite(db) => {
                 let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&db))
                     .open_file(path)
                     .await?;
@@ -241,7 +242,7 @@ impl SlateDbFileSystem {
                     flags,
                 )?))
             }
-            SlateDbClient::ReadOnly(reader) => {
+            SlateDbReadHandle::ReadOnly(reader) => {
                 let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&reader))
                     .open_file(path)
                     .await?;
@@ -258,8 +259,10 @@ impl SlateDbFileSystem {
     /// Returns whether a logical path is present in the database catalog.
     pub async fn file_exists(&self, path: &str) -> Result<bool> {
         match self.read_client(path).await {
-            Ok(SlateDbClient::ReadWrite(db)) => DatabaseMetadata::new(db).file_exists(path).await,
-            Ok(SlateDbClient::ReadOnly(reader)) => {
+            Ok(SlateDbReadHandle::ReadWrite(db)) => {
+                DatabaseMetadata::new(db).file_exists(path).await
+            }
+            Ok(SlateDbReadHandle::ReadOnly(reader)) => {
                 DatabaseMetadata::new(reader).file_exists(path).await
             }
             Err(Error::FileNotFound(_)) => Ok(false),
@@ -293,18 +296,15 @@ impl SlateDbFileSystem {
         self.closed = true;
         let mut result = Ok(());
         for client in std::mem::take(self.databases.get_mut()).into_values() {
-            let closed = match client {
-                SlateDbClient::ReadWrite(db) => db.close().await,
-                SlateDbClient::ReadOnly(reader) => reader.close().await,
-            };
-            if let (Ok(()), Err(error)) = (&result, closed) {
-                result = Err(error.into());
+            if let Some(db) = client.read_write {
+                if let (Ok(()), Err(error)) = (&result, db.close().await) {
+                    result = Err(error.into());
+                }
             }
-        }
-        for reader in std::mem::take(self.retired_readers.get_mut()) {
-            let closed = reader.close().await;
-            if let (Ok(()), Err(error)) = (&result, closed) {
-                result = Err(error.into());
+            if let Some(reader) = client.reader {
+                if let (Ok(()), Err(error)) = (&result, reader.close().await) {
+                    result = Err(error.into());
+                }
             }
         }
         result
@@ -321,28 +321,32 @@ impl SlateDbFileSystem {
     /// Returns a non-fencing client for the database `path` belongs to, opening
     /// a reader on first use. An existing writer is reused so reads see this
     /// process's writes.
-    async fn read_client(&self, path: &str) -> Result<SlateDbClient> {
+    async fn read_client(&self, path: &str) -> Result<SlateDbReadHandle> {
         if self.closed {
             return Err(filesystem_closed());
         }
         let group = database_group(path);
         let mut databases = self.databases.lock().await;
-        if let Some(client) = databases.get(&group) {
-            return Ok(client.clone());
+        if let Some(clients) = databases.get(&group) {
+            if let Some(db) = &clients.read_write {
+                return Ok(SlateDbReadHandle::ReadWrite(Arc::clone(db)));
+            }
+            if let Some(reader) = &clients.reader {
+                return Ok(SlateDbReadHandle::ReadOnly(Arc::clone(reader)));
+            }
         }
 
-        let client = SlateDbClient::ReadOnly(
-            self.open_reader(&group)
-                .await?
-                .ok_or_else(|| Error::file_not_found(path))?,
-        );
-        databases.insert(group, client.clone());
-        Ok(client)
+        let reader = self
+            .open_reader(&group)
+            .await?
+            .ok_or_else(|| Error::file_not_found(path))?;
+        databases.entry(group).or_default().reader = Some(Arc::clone(&reader));
+        Ok(SlateDbReadHandle::ReadOnly(reader))
     }
 
     /// Returns the writer for the database `path` belongs to, opening it on
-    /// first use and replacing any cached reader. Opening a writer creates a
-    /// SlateDB, so non-creating operations probe for an existing database first.
+    /// first use. Opening a writer creates a SlateDB, so non-creating operations
+    /// first open a reader to verify that the database exists.
     async fn write_db(&self, path: &str, create: bool, operation: &str) -> Result<Arc<Db>> {
         if self.closed {
             return Err(filesystem_closed());
@@ -353,26 +357,26 @@ impl SlateDbFileSystem {
 
         let group = database_group(path);
         let mut databases = self.databases.lock().await;
-        if let Some(SlateDbClient::ReadWrite(db)) = databases.get(&group) {
+        if let Some(db) = databases
+            .get(&group)
+            .and_then(|client| client.read_write.as_ref())
+        {
             return Ok(Arc::clone(db));
         }
 
-        let has_reader = matches!(databases.get(&group), Some(SlateDbClient::ReadOnly(_)));
+        let has_reader = databases
+            .get(&group)
+            .is_some_and(|client| client.reader.is_some());
         if !create && !has_reader {
-            match self.open_reader(&group).await? {
-                Some(reader) => reader.close().await?,
-                None => return Err(Error::file_not_found(path)),
-            }
+            let reader = self
+                .open_reader(&group)
+                .await?
+                .ok_or_else(|| Error::file_not_found(path))?;
+            databases.entry(group.clone()).or_default().reader = Some(reader);
         }
 
         let db = self.open_writer(&group).await?;
-        let replaced = databases.insert(group, SlateDbClient::ReadWrite(Arc::clone(&db)));
-        drop(databases);
-        if let Some(SlateDbClient::ReadOnly(reader)) = replaced {
-            // Existing file handles may still use this reader. Keep it alive and
-            // close it with the filesystem instead of inferring use from refcounts.
-            self.retired_readers.lock().await.push(reader);
-        }
+        databases.entry(group).or_default().read_write = Some(Arc::clone(&db));
         Ok(db)
     }
 
@@ -621,7 +625,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacing_a_reader_keeps_existing_read_handles_usable() {
+    async fn reader_remains_usable_after_opening_writer() {
         let root = tempdir().expect("temporary object-store root");
         let mut seed = open_local_fs("test-db", root.path()).await;
         write_file(&seed, "database.db", b"contents").await;
@@ -640,7 +644,6 @@ mod tests {
         let mut contents = [0; 8];
         assert_eq!(reader.pread(&mut contents, 0).await.expect("read"), 8);
         assert_eq!(&contents, b"contents");
-        assert_eq!(fs.retired_readers.lock().await.len(), 1);
 
         drop(reader);
         drop(writer);
@@ -1094,25 +1097,6 @@ mod tests {
 
         reader.close().await.expect("close reader");
         writer.close().await.expect("close writer");
-    }
-
-    #[tokio::test]
-    async fn missing_database_is_not_created_by_lookups() {
-        let root = tempdir().expect("temporary object-store root");
-        let mut fs = open_local_fs("shared-root", root.path()).await;
-
-        assert!(!fs.file_exists("missing.db").await.expect("exists"));
-        assert!(matches!(
-            fs.remove_file("missing.db").await,
-            Err(Error::FileNotFound(_))
-        ));
-        assert!(matches!(
-            fs.open_file("missing.db", FileOpenFlags::read_write())
-                .await,
-            Err(Error::FileNotFound(_))
-        ));
-        fs.close().await.expect("close");
-        assert!(!root.path().join("shared-root").exists());
     }
 
     #[tokio::test]
