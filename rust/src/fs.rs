@@ -53,12 +53,6 @@ enum SlateDbClient {
 }
 
 #[derive(Clone, Copy)]
-enum Access {
-    Read,
-    Write { create: bool },
-}
-
-#[derive(Clone, Copy)]
 pub(crate) enum SlateDbAccessMode {
     ReadWrite,
     ReadOnly,
@@ -217,17 +211,25 @@ impl SlateDbFileSystem {
         flags: FileOpenFlags,
     ) -> Result<Box<dyn FileHandle + Send>> {
         flags.validate()?;
-        let access = if flags.write || flags.create || flags.append || flags.truncate_existing {
-            Access::Write {
-                create: flags.create,
-            }
-        } else {
-            Access::Read
-        };
-        match self.client(path, access, "open a writable file").await? {
+        if flags.write {
+            let db = self
+                .write_db(path, flags.create, "open a writable file")
+                .await?;
+            let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&db))
+                .prepare_file_for_open(path, flags.create, flags.truncate_existing)
+                .await?;
+            return Ok(Box::new(SlateFileHandle::new(
+                SlateFileClient::ReadWrite(db),
+                file_id,
+                metadata,
+                flags,
+            )?));
+        }
+
+        match self.read_client(path).await? {
             SlateDbClient::ReadWrite(db) => {
                 let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&db))
-                    .prepare_file_for_open(path, flags.create, flags.truncate_existing)
+                    .open_file(path)
                     .await?;
                 Ok(Box::new(SlateFileHandle::new(
                     SlateFileClient::ReadWrite(db),
@@ -252,7 +254,7 @@ impl SlateDbFileSystem {
 
     /// Returns whether a logical path is present in the database catalog.
     pub async fn file_exists(&self, path: &str) -> Result<bool> {
-        match self.client(path, Access::Read, "").await {
+        match self.read_client(path).await {
             Ok(SlateDbClient::ReadWrite(db)) => DatabaseMetadata::new(db).file_exists(path).await,
             Ok(SlateDbClient::ReadOnly(reader)) => {
                 DatabaseMetadata::new(reader).file_exists(path).await
@@ -264,7 +266,7 @@ impl SlateDbFileSystem {
 
     /// Atomically removes a logical file and all of its persisted state.
     pub async fn remove_file(&self, path: &str) -> Result<()> {
-        let db = self.read_write_db(path, "remove a file").await?;
+        let db = self.write_db(path, false, "remove a file").await?;
         DatabaseMetadata::new(db).remove_file(path).await
     }
 
@@ -276,7 +278,7 @@ impl SlateDbFileSystem {
                 "cannot move '{source}' to '{target}': files of different databases are stored separately"
             )));
         }
-        let db = self.read_write_db(source, "move a file").await?;
+        let db = self.write_db(source, false, "move a file").await?;
         DatabaseMetadata::new(db).move_file(source, target).await
     }
 
@@ -307,62 +309,63 @@ impl SlateDbFileSystem {
         path.starts_with(PREFIX)
     }
 
-    async fn read_write_db(&self, path: &str, operation: &str) -> Result<Arc<Db>> {
-        match self
-            .client(path, Access::Write { create: false }, operation)
-            .await?
-        {
-            SlateDbClient::ReadWrite(db) => Ok(db),
-            SlateDbClient::ReadOnly(_) => Err(read_only_violation(operation)),
-        }
-    }
-
-    /// Returns the SlateDB of the database `path` belongs to, opening it on
-    /// first use. Reads reuse any open client, including this process's writer,
-    /// so they see its writes; only writes open a writer and fence other
-    /// writers of the same database.
-    async fn client(&self, path: &str, access: Access, operation: &str) -> Result<SlateDbClient> {
+    /// Returns a non-fencing client for the database `path` belongs to, opening
+    /// a reader on first use. An existing writer is reused so reads see this
+    /// process's writes.
+    async fn read_client(&self, path: &str) -> Result<SlateDbClient> {
         if self.closed {
             return Err(filesystem_closed());
         }
         let group = database_group(path);
         let mut databases = self.databases.lock().await;
-        let existing = databases.get(&group).cloned();
-        match (access, &existing) {
-            (Access::Read, Some(client))
-            | (Access::Write { .. }, Some(client @ SlateDbClient::ReadWrite(_))) => {
-                return Ok(client.clone());
-            }
-            _ => {}
+        if let Some(client) = databases.get(&group) {
+            return Ok(client.clone());
         }
 
-        let client = match access {
-            Access::Read => SlateDbClient::ReadOnly(
-                self.open_reader(&group)
-                    .await?
-                    .ok_or_else(|| Error::file_not_found(path))?,
-            ),
-            Access::Write { create } => {
-                if matches!(self.access_mode, SlateDbAccessMode::ReadOnly) {
-                    return Err(read_only_violation(operation));
-                }
-                // Opening a writer creates the database, so check that it exists first.
-                if !create && existing.is_none() {
-                    match self.open_reader(&group).await? {
-                        Some(reader) => reader.close().await?,
-                        None => return Err(Error::file_not_found(path)),
-                    }
-                }
-                SlateDbClient::ReadWrite(self.open_writer(&group).await?)
+        let client = SlateDbClient::ReadOnly(
+            self.open_reader(&group)
+                .await?
+                .ok_or_else(|| Error::file_not_found(path))?,
+        );
+        databases.insert(group, client.clone());
+        Ok(client)
+    }
+
+    /// Returns the writer for the database `path` belongs to, opening it on
+    /// first use and replacing any cached reader. Opening a writer creates a
+    /// SlateDB, so non-creating operations probe for an existing database first.
+    async fn write_db(&self, path: &str, create: bool, operation: &str) -> Result<Arc<Db>> {
+        if self.closed {
+            return Err(filesystem_closed());
+        }
+        if matches!(self.access_mode, SlateDbAccessMode::ReadOnly) {
+            return Err(read_only_violation(operation));
+        }
+
+        let group = database_group(path);
+        let mut databases = self.databases.lock().await;
+        if let Some(SlateDbClient::ReadWrite(db)) = databases.get(&group) {
+            return Ok(Arc::clone(db));
+        }
+
+        let has_reader = matches!(databases.get(&group), Some(SlateDbClient::ReadOnly(_)));
+        if !create && !has_reader {
+            match self.open_reader(&group).await? {
+                Some(reader) => reader.close().await?,
+                None => return Err(Error::file_not_found(path)),
             }
-        };
-        if let Some(SlateDbClient::ReadOnly(reader)) = databases.insert(group, client.clone()) {
+        }
+
+        let db = self.open_writer(&group).await?;
+        if let Some(SlateDbClient::ReadOnly(reader)) =
+            databases.insert(group, SlateDbClient::ReadWrite(Arc::clone(&db)))
+        {
             // A reader still used by open file handles is left to them.
             if Arc::strong_count(&reader) == 1 {
                 reader.close().await?;
             }
         }
-        Ok(client)
+        Ok(db)
     }
 
     fn slatedb_path(&self, group: &str) -> String {
@@ -783,7 +786,7 @@ mod tests {
         assert_eq!(replaced.file_id(), file_id);
         assert_eq!(replaced.file_size(), 0);
         assert!(fs
-            .read_write_db("recovery.wal", "inspect database")
+            .write_db("recovery.wal", false, "inspect database")
             .await
             .expect("read-write database")
             .scan_prefix(keys::chunk_prefix(file_id), ..)
@@ -839,7 +842,7 @@ mod tests {
 
         let mut batch = WriteBatch::new();
         batch.delete(keys::metadata_key(file_id));
-        fs.read_write_db("database.db", "inspect database")
+        fs.write_db("database.db", false, "inspect database")
             .await
             .expect("read-write database")
             .write(batch)
@@ -869,7 +872,7 @@ mod tests {
 
         assert!(!fs.file_exists("database.db").await.expect("path lookup"));
         let db = fs
-            .read_write_db("database.db", "inspect database")
+            .write_db("database.db", false, "inspect database")
             .await
             .expect("read-write database");
         assert!(db
@@ -943,7 +946,7 @@ mod tests {
         drop(moved);
 
         let db = fs
-            .read_write_db("database.db", "inspect database")
+            .write_db("database.db", false, "inspect database")
             .await
             .expect("read-write database");
         assert!(db
