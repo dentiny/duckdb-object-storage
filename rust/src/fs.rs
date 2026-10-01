@@ -210,20 +210,36 @@ impl SlateDbFileSystem {
     ) -> Result<Box<dyn FileHandle + Send>> {
         flags.validate()?;
         if flags.write {
-            let db = self
-                .write_db(path, flags.create, "open a writable file")
-                .await?;
-            let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&db))
-                .prepare_file_for_open(path, flags.create, flags.truncate_existing)
-                .await?;
-            return Ok(Box::new(SlateFileHandle::new(
-                SlateFileClient::ReadWrite(db),
-                file_id,
-                metadata,
-                flags,
-            )?));
+            self.open_write_handle(path, flags).await
+        } else {
+            self.open_read_handle(path, flags).await
         }
+    }
 
+    async fn open_write_handle(
+        &self,
+        path: &str,
+        flags: FileOpenFlags,
+    ) -> Result<Box<dyn FileHandle + Send>> {
+        let db = self
+            .write_db(path, flags.create, "open a writable file")
+            .await?;
+        let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&db))
+            .prepare_file_for_open(path, flags.create, flags.truncate_existing)
+            .await?;
+        Ok(Box::new(SlateFileHandle::new(
+            SlateFileClient::ReadWrite(db),
+            file_id,
+            metadata,
+            flags,
+        )?))
+    }
+
+    async fn open_read_handle(
+        &self,
+        path: &str,
+        flags: FileOpenFlags,
+    ) -> Result<Box<dyn FileHandle + Send>> {
         let client = self.read_client(path).await?;
         if let Some(db) = client.read_write {
             let (file_id, metadata) = DatabaseMetadata::new(Arc::clone(&db))
