@@ -41,6 +41,8 @@ pub struct SlateDbFileSystem {
     access_mode: SlateDbAccessMode,
     /// Keyed by `database_group`.
     databases: Mutex<HashMap<String, SlateDbClient>>,
+    /// Readers replaced by writers remain alive for existing file handles.
+    retired_readers: Mutex<Vec<Arc<DbReader>>>,
     closed: bool,
     pub(crate) cache_metrics: CacheMetrics,
     pub(crate) io_metrics: Arc<IoMetrics>,
@@ -109,6 +111,7 @@ impl SlateDbFileSystem {
             cache_config,
             access_mode,
             databases: Mutex::new(HashMap::new()),
+            retired_readers: Mutex::new(Vec::new()),
             closed: false,
             cache_metrics: CacheMetrics::new(),
             io_metrics,
@@ -298,6 +301,12 @@ impl SlateDbFileSystem {
                 result = Err(error.into());
             }
         }
+        for reader in std::mem::take(self.retired_readers.get_mut()) {
+            let closed = reader.close().await;
+            if let (Ok(()), Err(error)) = (&result, closed) {
+                result = Err(error.into());
+            }
+        }
         result
     }
 
@@ -357,17 +366,18 @@ impl SlateDbFileSystem {
         }
 
         let db = self.open_writer(&group).await?;
-        if let Some(SlateDbClient::ReadOnly(reader)) =
-            databases.insert(group, SlateDbClient::ReadWrite(Arc::clone(&db)))
-        {
-            // A reader still used by open file handles is left to them.
-            if Arc::strong_count(&reader) == 1 {
-                reader.close().await?;
-            }
+        let replaced = databases.insert(group, SlateDbClient::ReadWrite(Arc::clone(&db)));
+        drop(databases);
+        if let Some(SlateDbClient::ReadOnly(reader)) = replaced {
+            // Existing file handles may still use this reader. Keep it alive and
+            // close it with the filesystem instead of inferring use from refcounts.
+            self.retired_readers.lock().await.push(reader);
         }
         Ok(db)
     }
 
+    /// For example, group `dir/database.db` under `root` is stored at
+    /// `root/dir%2Fdatabase.db`.
     fn slatedb_path(&self, group: &str) -> String {
         // Flatten the group so one database's SlateDB never nests inside another's.
         let group = group.replace('%', "%25").replace('/', "%2F");
@@ -512,6 +522,7 @@ mod tests {
 
     use super::*;
     use crate::keys;
+    use crate::test_utils::{open_local_fs, read_file, write_file};
 
     const S3_ACCESS_KEY: &str = "test-access-key";
     const S3_BUCKET: &str = "test-bucket";
@@ -596,6 +607,44 @@ mod tests {
         drop(reopened);
 
         fs.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn close_is_idempotent() {
+        let mut fs = SlateDbFileSystem::open_in_memory("test-db")
+            .await
+            .expect("filesystem");
+        write_file(&fs, "database.db", b"contents").await;
+
+        fs.close().await.expect("first close");
+        fs.close().await.expect("second close");
+    }
+
+    #[tokio::test]
+    async fn replacing_a_reader_keeps_existing_read_handles_usable() {
+        let root = tempdir().expect("temporary object-store root");
+        let mut seed = open_local_fs("test-db", root.path()).await;
+        write_file(&seed, "database.db", b"contents").await;
+        seed.close().await.expect("close seed filesystem");
+
+        let mut fs = open_local_fs("test-db", root.path()).await;
+        let reader = fs
+            .open_file("database.db", FileOpenFlags::read_only())
+            .await
+            .expect("open reader");
+        let writer = fs
+            .open_file("database.db", FileOpenFlags::read_write())
+            .await
+            .expect("open writer");
+
+        let mut contents = [0; 8];
+        assert_eq!(reader.pread(&mut contents, 0).await.expect("read"), 8);
+        assert_eq!(&contents, b"contents");
+        assert_eq!(fs.retired_readers.lock().await.len(), 1);
+
+        drop(reader);
+        drop(writer);
+        fs.close().await.expect("close filesystem");
     }
 
     #[tokio::test]
@@ -1009,39 +1058,14 @@ mod tests {
         fs.close().await.expect("close");
     }
 
-    async fn write_file(fs: &SlateDbFileSystem, path: &str, contents: &[u8]) {
-        let mut file = fs
-            .open_file(path, FileOpenFlags::open_or_create())
-            .await
-            .expect("open file for writing");
-        file.pwrite(contents, 0).await.expect("write file");
-        file.close().await.expect("close file");
-    }
-
-    async fn read_file(fs: &SlateDbFileSystem, path: &str, len: usize) -> Vec<u8> {
-        let mut file = fs
-            .open_file(path, FileOpenFlags::read_only())
-            .await
-            .expect("open file for reading");
-        let mut contents = vec![0; len];
-        assert_eq!(file.pread(&mut contents, 0).await.expect("read file"), len);
-        file.close().await.expect("close file");
-        contents
-    }
-
     #[tokio::test]
     async fn writers_of_different_databases_share_a_root() {
         let root = tempdir().expect("temporary object-store root");
-        let mut first = SlateDbFileSystem::open_local("shared-root", root.path())
-            .await
-            .expect("first writer");
-        let mut second = SlateDbFileSystem::open_local("shared-root", root.path())
-            .await
-            .expect("second writer");
+        let mut first = open_local_fs("shared-root", root.path()).await;
+        let mut second = open_local_fs("shared-root", root.path()).await;
 
         write_file(&first, "a.db", b"a1").await;
         write_file(&second, "b.db", b"b1").await;
-        // Opening b.db's writer must not fence a.db's writer.
         write_file(&first, "a.db", b"a2").await;
         write_file(&first, "a.db.wal", b"wal").await;
         write_file(&second, "b.db", b"b2").await;
@@ -1049,9 +1073,7 @@ mod tests {
         first.close().await.expect("close first");
         second.close().await.expect("close second");
 
-        let mut reopened = SlateDbFileSystem::open_local("shared-root", root.path())
-            .await
-            .expect("reopen");
+        let mut reopened = open_local_fs("shared-root", root.path()).await;
         assert_eq!(read_file(&reopened, "a.db", 2).await, b"a2");
         assert_eq!(read_file(&reopened, "a.db.wal", 3).await, b"wal");
         assert_eq!(read_file(&reopened, "b.db", 2).await, b"b2");
@@ -1061,29 +1083,23 @@ mod tests {
     #[tokio::test]
     async fn reads_on_a_writable_filesystem_do_not_fence_the_writer() {
         let root = tempdir().expect("temporary object-store root");
-        let mut writer = SlateDbFileSystem::open_local("shared-root", root.path())
-            .await
-            .expect("writer");
-        let mut other = SlateDbFileSystem::open_local("shared-root", root.path())
-            .await
-            .expect("other process");
+        let mut writer = open_local_fs("shared-root", root.path()).await;
+        let mut reader = open_local_fs("shared-root", root.path()).await;
 
         write_file(&writer, "a.db", b"before").await;
-        assert!(other.file_exists("a.db").await.expect("exists"));
-        assert!(!other.file_exists("a.db.wal").await.expect("missing wal"));
-        assert_eq!(read_file(&other, "a.db", 6).await, b"before");
+        assert!(reader.file_exists("a.db").await.expect("exists"));
+        assert!(!reader.file_exists("a.db.wal").await.expect("missing wal"));
+        assert_eq!(read_file(&reader, "a.db", 6).await, b"before");
         write_file(&writer, "a.db", b"after!").await;
 
-        other.close().await.expect("close other");
+        reader.close().await.expect("close reader");
         writer.close().await.expect("close writer");
     }
 
     #[tokio::test]
     async fn missing_database_is_not_created_by_lookups() {
         let root = tempdir().expect("temporary object-store root");
-        let mut fs = SlateDbFileSystem::open_local("shared-root", root.path())
-            .await
-            .expect("filesystem");
+        let mut fs = open_local_fs("shared-root", root.path()).await;
 
         assert!(!fs.file_exists("missing.db").await.expect("exists"));
         assert!(matches!(
