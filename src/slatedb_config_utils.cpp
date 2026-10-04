@@ -94,6 +94,10 @@ CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener>
 	return result;
 }
 
+uint64_t GetTokioWorkerThreadsSetting(optional_ptr<FileOpener> opener) {
+	return GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_tokio_worker_threads", 0);
+}
+
 void CheckFrozenSlateDBSetting(ClientContext &context, const string &name, const Value &new_value) {
 	auto frozen = context.db->GetObjectCache().Get<FrozenSlateDBSettings>(FrozenSlateDBSettings::CACHE_KEY);
 	if (!frozen) {

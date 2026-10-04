@@ -50,11 +50,6 @@ struct CacheInitializationConfig {
 	bool persistent_cache_on_compaction = false;
 };
 
-struct DatabaseInitializationConfig {
-	CacheInitializationConfig cache;
-	bool read_only = false;
-};
-
 // Snapshot of the settings the SlateDB filesystem was initialized with, runtime configs are rejected if they differ
 // from the snapshot. Values are stored in their normalized Value::ToString() form so the set callback can compare
 // with a single map lookup.
@@ -80,6 +75,7 @@ string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name);
 string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name);
 S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener);
 CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener> opener);
+uint64_t GetTokioWorkerThreadsSetting(optional_ptr<FileOpener> opener);
 
 //! Throws if the SlateDB filesystem is already initialized and `new_value` differs from the value the filesystem was
 //! initialized with.

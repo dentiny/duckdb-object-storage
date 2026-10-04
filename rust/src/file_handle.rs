@@ -136,7 +136,7 @@ impl SlateFileHandle {
             flags.ensure_readable(file_id)?;
             if flags.write {
                 return Err(Error::read_only_violation(
-                    "read-only SlateDB filesystem cannot create a writable file handle",
+                    "read-only SlateDB client cannot create a writable file handle",
                 ));
             }
         }

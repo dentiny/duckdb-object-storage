@@ -48,8 +48,8 @@ slatedb_cache_config ConvertCacheConfig(const CacheInitializationConfig &config)
 	        config.persistent_cache_on_compaction};
 }
 
-slatedb_db_config ConvertDatabaseConfig(const DatabaseInitializationConfig &config) {
-	return {config.read_only};
+slatedb_runtime_config ConvertRuntimeConfig(uint64_t tokio_worker_threads) {
+	return {tokio_worker_threads};
 }
 
 } // namespace
@@ -65,47 +65,42 @@ SlateDBFileSystem::SlateDBFileSystem() {
 
 unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateInMemory() {
 	auto result = make_uniq<SlateDBFileSystem>();
-	result->InitializeMemory(DatabaseInitializationConfig());
+	InitializationConfig config;
+	config.backend = "memory";
+	result->Initialize(config);
 	return result;
 }
 
 unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocal(const string &root) {
 	auto result = make_uniq<SlateDBFileSystem>();
-	result->InitializeLocal(root, DatabaseInitializationConfig());
+	InitializationConfig config;
+	config.backend = "local";
+	config.local_root = root;
+	result->Initialize(config);
 	return result;
 }
 
-void SlateDBFileSystem::InitializeMemory(const DatabaseInitializationConfig &config) {
-	slatedb_fs *ptr = nullptr;
+void SlateDBFileSystem::Initialize(const InitializationConfig &config) {
 	auto ffi_cache = ConvertCacheConfig(config.cache);
-	auto ffi_database = ConvertDatabaseConfig(config);
-	auto code = slatedb_fs_create_memory(&ffi_cache, &ffi_database, &ptr);
-	ThrowSlateDBError(code, "initialize in-memory SlateDB filesystem");
-	(config.read_only ? read_only_impl : read_write_impl).reset(ptr);
-}
-
-void SlateDBFileSystem::InitializeLocal(const string &root, const DatabaseInitializationConfig &config) {
+	auto ffi_runtime = ConvertRuntimeConfig(config.tokio_worker_threads);
 	slatedb_fs *ptr = nullptr;
-	auto ffi_cache = ConvertCacheConfig(config.cache);
-	auto ffi_database = ConvertDatabaseConfig(config);
-	auto code = slatedb_fs_create_local(root.c_str(), &ffi_cache, &ffi_database, &ptr);
-	ThrowSlateDBError(code, "initialize local SlateDB filesystem");
-	(config.read_only ? read_only_impl : read_write_impl).reset(ptr);
-}
-
-void SlateDBFileSystem::InitializeS3(const S3InitializationConfig &s3_config,
-                                     const DatabaseInitializationConfig &config) {
-	slatedb_s3_config ffi_config {
-	    s3_config.bucket.c_str(),        s3_config.root.c_str(),   s3_config.endpoint.c_str(),
-	    s3_config.region.c_str(),        s3_config.key_id.c_str(), s3_config.secret.c_str(),
-	    s3_config.session_token.c_str(), s3_config.use_ssl,        s3_config.virtual_host_style,
-	};
-	auto ffi_cache = ConvertCacheConfig(config.cache);
-	auto ffi_database = ConvertDatabaseConfig(config);
-	slatedb_fs *ptr = nullptr;
-	auto code = slatedb_fs_create_s3(&ffi_config, &ffi_cache, &ffi_database, &ptr);
-	ThrowSlateDBError(code, "initialize S3-backed SlateDB filesystem");
-	(config.read_only ? read_only_impl : read_write_impl).reset(ptr);
+	if (config.backend == "memory") {
+		ThrowSlateDBError(slatedb_fs_create_memory(&ffi_cache, &ffi_runtime, &ptr),
+		                  "initialize in-memory SlateDB filesystem");
+	} else if (config.backend == "local") {
+		ThrowSlateDBError(slatedb_fs_create_local(config.local_root.c_str(), &ffi_cache, &ffi_runtime, &ptr),
+		                  "initialize local SlateDB filesystem");
+	} else {
+		D_ASSERT(config.backend == "s3");
+		auto &s3 = config.s3;
+		slatedb_s3_config ffi_s3 {
+		    s3.bucket.c_str(), s3.root.c_str(),          s3.endpoint.c_str(), s3.region.c_str(),     s3.key_id.c_str(),
+		    s3.secret.c_str(), s3.session_token.c_str(), s3.use_ssl,          s3.virtual_host_style,
+		};
+		ThrowSlateDBError(slatedb_fs_create_s3(&ffi_s3, &ffi_cache, &ffi_runtime, &ptr),
+		                  "initialize S3-backed SlateDB filesystem");
+	}
+	impl.reset(ptr);
 }
 
 SlateDBFileSystem::InitializationConfig SlateDBFileSystem::ReadInitializationConfig(optional_ptr<FileOpener> opener) {
@@ -116,6 +111,7 @@ SlateDBFileSystem::InitializationConfig SlateDBFileSystem::ReadInitializationCon
 	}
 	result.backend = StringUtil::Lower(result.backend);
 	result.cache = ReadCacheInitializationConfig(opener);
+	result.tokio_worker_threads = GetTokioWorkerThreadsSetting(opener);
 	if (result.backend == "local") {
 		result.local_root = GetOptionalSetting(opener, "duckdb_objfs_root");
 		if (result.local_root.empty()) {
@@ -175,56 +171,36 @@ void SlateDBFileSystem::FreezeSettingsSnapshot(optional_ptr<FileOpener> opener, 
 	    Value::BOOLEAN(config.cache.persistent_cache_on_flush).ToString();
 	values["duckdb_objfs_persistent_cache_on_compaction"] =
 	    Value::BOOLEAN(config.cache.persistent_cache_on_compaction).ToString();
+	values["duckdb_objfs_tokio_worker_threads"] = Value::UBIGINT(config.tokio_worker_threads).ToString();
 	database->GetObjectCache().Put(FrozenSlateDBSettings::CACHE_KEY, std::move(frozen));
 }
 
-slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> opener, bool read_only) {
+slatedb_fs *SlateDBFileSystem::GetOrCreateFileSystem(optional_ptr<FileOpener> opener) {
 	lock_guard<mutex> guard(initialization_lock);
 	EnsureTemporaryFilesStayLocal(opener);
-	if (read_only && read_write_impl) {
-		return read_write_impl.get();
+	if (!impl) {
+		auto config = ReadInitializationConfig(opener);
+		Initialize(config);
+		FreezeSettingsSnapshot(opener, config);
 	}
-	auto &selected_impl = read_only ? read_only_impl : read_write_impl;
-	if (selected_impl) {
-		return selected_impl.get();
-	}
-
-	if (!initialization_config) {
-		initialization_config = make_uniq<InitializationConfig>(ReadInitializationConfig(opener));
-		FreezeSettingsSnapshot(opener, *initialization_config);
-	}
-	auto &config = *initialization_config;
-	DatabaseInitializationConfig database_config;
-	database_config.cache = config.cache;
-	database_config.read_only = read_only;
-	if (config.backend == "memory") {
-		InitializeMemory(database_config);
-	} else if (config.backend == "local") {
-		InitializeLocal(config.local_root, database_config);
-	} else {
-		D_ASSERT(config.backend == "s3");
-		InitializeS3(config.s3, database_config);
-	}
-	return selected_impl.get();
+	return impl.get();
 }
 
 bool SlateDBFileSystem::TryGetCacheStats(slatedb_cache_stats &stats) {
 	lock_guard<mutex> guard(initialization_lock);
-	auto impl = read_write_impl ? read_write_impl.get() : read_only_impl.get();
 	if (!impl) {
 		return false;
 	}
-	ThrowSlateDBError(slatedb_fs_get_cache_stats(impl, &stats), "get SlateDB cache statistics");
+	ThrowSlateDBError(slatedb_fs_get_cache_stats(impl.get(), &stats), "get SlateDB cache statistics");
 	return true;
 }
 
 bool SlateDBFileSystem::TryGetIoStats(slatedb_io_stats &stats) {
 	lock_guard<mutex> guard(initialization_lock);
-	auto impl = read_write_impl ? read_write_impl.get() : read_only_impl.get();
 	if (!impl) {
 		return false;
 	}
-	ThrowSlateDBError(slatedb_fs_get_io_stats(impl, &stats), "get SlateDB I/O statistics");
+	ThrowSlateDBError(slatedb_fs_get_io_stats(impl.get(), &stats), "get SlateDB I/O statistics");
 	return true;
 }
 
@@ -234,8 +210,7 @@ unique_ptr<FileHandle> SlateDBFileSystem::OpenFile(const string &path, FileOpenF
 	auto options = ConvertOpenFlags(flags);
 	slatedb_file_handle *handle = nullptr;
 	auto logical_path = GetLogicalPath(path);
-	auto read_only = !flags.OpenForWriting();
-	auto code = slatedb_fs_open_file(GetOrCreateFileSystem(opener, read_only), logical_path.c_str(), &options, &handle);
+	auto code = slatedb_fs_open_file(GetOrCreateFileSystem(opener), logical_path.c_str(), &options, &handle);
 	if ((code == SLATEDB_FS_ERROR_FILE_NOT_FOUND && flags.ReturnNullIfNotExists()) ||
 	    (code == SLATEDB_FS_ERROR_FILE_ALREADY_EXISTS && flags.ReturnNullIfExists())) {
 		return nullptr;
@@ -323,14 +298,13 @@ void SlateDBFileSystem::MoveFile(const string &source, const string &target, opt
 	auto logical_source = GetLogicalPath(source);
 	auto logical_target = GetLogicalPath(target);
 	ThrowSlateDBError(
-	    slatedb_fs_move_file(GetOrCreateFileSystem(opener, false), logical_source.c_str(), logical_target.c_str()),
+	    slatedb_fs_move_file(GetOrCreateFileSystem(opener), logical_source.c_str(), logical_target.c_str()),
 	    "move file");
 }
 
 void SlateDBFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
 	auto logical_path = GetLogicalPath(filename);
-	ThrowSlateDBError(slatedb_fs_remove_file(GetOrCreateFileSystem(opener, false), logical_path.c_str()),
-	                  "remove file");
+	ThrowSlateDBError(slatedb_fs_remove_file(GetOrCreateFileSystem(opener), logical_path.c_str()), "remove file");
 }
 
 vector<OpenFileInfo> SlateDBFileSystem::Glob(const string &, FileOpener *) {
@@ -340,7 +314,7 @@ vector<OpenFileInfo> SlateDBFileSystem::Glob(const string &, FileOpener *) {
 bool SlateDBFileSystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
 	int32_t exists = 0;
 	auto logical_path = GetLogicalPath(filename);
-	ThrowSlateDBError(slatedb_fs_file_exists(GetOrCreateFileSystem(opener, false), logical_path.c_str(), &exists),
+	ThrowSlateDBError(slatedb_fs_file_exists(GetOrCreateFileSystem(opener), logical_path.c_str(), &exists),
 	                  "check if file exists");
 	return exists != 0;
 }

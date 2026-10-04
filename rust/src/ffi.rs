@@ -12,7 +12,7 @@ use crate::cache::CacheConfig;
 use crate::error::{Error, Result};
 use crate::file_handle::FileHandle;
 use crate::flags::FileOpenFlags;
-use crate::fs::{S3StorageConfig, SlateDbAccessMode, SlateDbFileSystem};
+use crate::fs::{S3StorageConfig, SlateDbFileSystem};
 
 const DATABASE_PATH: &str = "duckdb-object-storage";
 
@@ -73,9 +73,9 @@ pub struct FfiCacheConfig {
 }
 
 #[repr(C)]
-pub struct FfiDatabaseConfig {
-    /// Open the SlateDB database without acquiring a writer epoch.
-    read_only: i32,
+pub struct FfiRuntimeConfig {
+    /// Number of Tokio runtime worker threads; zero selects the CPU count.
+    tokio_worker_threads: u64,
 }
 
 #[repr(C)]
@@ -288,15 +288,16 @@ unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlag
     })
 }
 
-unsafe fn require_database_config(config: *const FfiDatabaseConfig) -> Result<SlateDbAccessMode> {
-    let config = unsafe { config.as_ref() }
-        .ok_or_else(|| Error::invalid_argument("database config must not be null"))?;
-    match config.read_only {
-        0 => Ok(SlateDbAccessMode::ReadWrite),
-        1 => Ok(SlateDbAccessMode::ReadOnly),
-        _ => Err(Error::invalid_argument(
-            "database config read_only must be 0 or 1",
-        )),
+/// Returns the configured Tokio worker thread count, or `None` for the default.
+unsafe fn parse_runtime_config(config: *const FfiRuntimeConfig) -> Result<Option<usize>> {
+    let Some(config) = (unsafe { config.as_ref() }) else {
+        return Ok(None);
+    };
+    match config.tokio_worker_threads {
+        0 => Ok(None),
+        value => Ok(Some(usize::try_from(value).map_err(|_| {
+            Error::invalid_argument("Tokio worker thread count does not fit this platform")
+        })?)),
     }
 }
 
@@ -363,8 +364,12 @@ unsafe fn write_buffer<'a>(buffer: *const u8, len: usize) -> Result<&'a [u8]> {
     Ok(unsafe { slice::from_raw_parts(buffer, len) })
 }
 
-fn create_runtime() -> Result<Arc<Runtime>> {
-    tokio::runtime::Builder::new_multi_thread()
+fn create_runtime(worker_threads: Option<usize>) -> Result<Arc<Runtime>> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if let Some(worker_threads) = worker_threads {
+        builder.worker_threads(worker_threads);
+    }
+    builder
         .enable_all()
         .build()
         .map(Arc::new)
@@ -374,19 +379,18 @@ fn create_runtime() -> Result<Arc<Runtime>> {
 #[no_mangle]
 pub unsafe extern "C" fn slatedb_fs_create_memory(
     cache_config: *const FfiCacheConfig,
-    database_config: *const FfiDatabaseConfig,
+    runtime_config: *const FfiRuntimeConfig,
     output: *mut *mut FfiFileSystem,
 ) -> i32 {
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
-        let access_mode = unsafe { require_database_config(database_config)? };
+        let worker_threads = unsafe { parse_runtime_config(runtime_config)? };
         let cache_config = unsafe { parse_cache_config(cache_config)? };
-        let runtime = create_runtime()?;
+        let runtime = create_runtime(worker_threads)?;
         let fs = runtime.block_on(SlateDbFileSystem::open_in_memory_with_cache_config(
             DATABASE_PATH,
             cache_config,
-            access_mode,
         ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
@@ -397,24 +401,23 @@ pub unsafe extern "C" fn slatedb_fs_create_memory(
 pub unsafe extern "C" fn slatedb_fs_create_local(
     root: *const c_char,
     cache_config: *const FfiCacheConfig,
-    database_config: *const FfiDatabaseConfig,
+    runtime_config: *const FfiRuntimeConfig,
     output: *mut *mut FfiFileSystem,
 ) -> i32 {
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
-        let access_mode = unsafe { require_database_config(database_config)? };
+        let worker_threads = unsafe { parse_runtime_config(runtime_config)? };
         let root = unsafe { require_path(root, "local root")? };
         if root.is_empty() {
             return Err(Error::invalid_argument("local root must not be empty"));
         }
         let cache_config = unsafe { parse_cache_config(cache_config)? };
-        let runtime = create_runtime()?;
+        let runtime = create_runtime(worker_threads)?;
         let fs = runtime.block_on(SlateDbFileSystem::open_local_with_cache_config(
             DATABASE_PATH,
             root,
             cache_config,
-            access_mode,
         ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
@@ -425,21 +428,20 @@ pub unsafe extern "C" fn slatedb_fs_create_local(
 pub unsafe extern "C" fn slatedb_fs_create_s3(
     config: *const FfiS3Config,
     cache_config: *const FfiCacheConfig,
-    database_config: *const FfiDatabaseConfig,
+    runtime_config: *const FfiRuntimeConfig,
     output: *mut *mut FfiFileSystem,
 ) -> i32 {
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
-        let access_mode = unsafe { require_database_config(database_config)? };
+        let worker_threads = unsafe { parse_runtime_config(runtime_config)? };
         let config = unsafe { require_s3_config(config)? };
         let cache_config = unsafe { parse_cache_config(cache_config)? };
-        let runtime = create_runtime()?;
+        let runtime = create_runtime(worker_threads)?;
         let fs = runtime.block_on(SlateDbFileSystem::open_s3_with_cache_config(
             DATABASE_PATH,
             config,
             cache_config,
-            access_mode,
         ))?;
         *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
         Ok(())
@@ -769,12 +771,6 @@ pub extern "C" fn slatedb_fs_name() -> *const c_char {
 mod tests {
     use super::*;
 
-    fn database_config(read_only: bool) -> FfiDatabaseConfig {
-        FfiDatabaseConfig {
-            read_only: i32::from(read_only),
-        }
-    }
-
     fn read_write_options() -> FfiOpenOptions {
         FfiOpenOptions {
             read: 1,
@@ -807,8 +803,7 @@ mod tests {
 
     unsafe fn create_fs() -> *mut FfiFileSystem {
         let mut fs = ptr::null_mut();
-        let config = database_config(false);
-        expect_ok(slatedb_fs_create_memory(ptr::null(), &config, &mut fs));
+        expect_ok(slatedb_fs_create_memory(ptr::null(), ptr::null(), &mut fs));
         assert!(!fs.is_null());
         fs
     }
@@ -855,10 +850,9 @@ mod tests {
                 virtual_host_style: 0,
             };
             let mut fs = ptr::null_mut();
-            let database_config = database_config(false);
 
             assert_eq!(
-                slatedb_fs_create_s3(&config, ptr::null(), &database_config, &mut fs),
+                slatedb_fs_create_s3(&config, ptr::null(), ptr::null(), &mut fs),
                 crate::error::ErrorCode::InvalidArgument as i32
             );
             assert!(fs.is_null());
@@ -872,9 +866,8 @@ mod tests {
         unsafe {
             let empty = CString::new("").unwrap();
             let mut fs = ptr::null_mut();
-            let database_config = database_config(false);
             assert_eq!(
-                slatedb_fs_create_local(empty.as_ptr(), ptr::null(), &database_config, &mut fs,),
+                slatedb_fs_create_local(empty.as_ptr(), ptr::null(), ptr::null(), &mut fs,),
                 crate::error::ErrorCode::InvalidArgument as i32
             );
             assert!(fs.is_null());
@@ -884,7 +877,7 @@ mod tests {
             expect_ok(slatedb_fs_create_local(
                 root.as_ptr(),
                 ptr::null(),
-                &database_config,
+                ptr::null(),
                 &mut fs,
             ));
             assert!(!fs.is_null());
@@ -893,18 +886,17 @@ mod tests {
     }
 
     #[test]
-    fn ffi_read_only_local_client_reopens_writer_data() {
+    fn ffi_local_client_reopens_writer_data() {
         unsafe {
             let root = tempfile::tempdir().expect("temporary local root");
             let root = CString::new(root.path().to_str().expect("UTF-8 local root")).unwrap();
             let path = CString::new("database.db").unwrap();
 
             let mut writer = ptr::null_mut();
-            let writer_config = database_config(false);
             expect_ok(slatedb_fs_create_local(
                 root.as_ptr(),
                 ptr::null(),
-                &writer_config,
+                ptr::null(),
                 &mut writer,
             ));
             let handle = open_file(writer, &path, &read_write_options());
@@ -920,11 +912,10 @@ mod tests {
             slatedb_fs_destroy(writer);
 
             let mut reader = ptr::null_mut();
-            let reader_config = database_config(true);
             expect_ok(slatedb_fs_create_local(
                 root.as_ptr(),
                 ptr::null(),
-                &reader_config,
+                ptr::null(),
                 &mut reader,
             ));
             assert!(file_exists(reader, &path));
@@ -940,6 +931,19 @@ mod tests {
             assert_eq!(&contents, b"contents");
             slatedb_file_destroy(handle);
             slatedb_fs_destroy(reader);
+        }
+    }
+
+    #[test]
+    fn ffi_constructor_honors_tokio_worker_threads() {
+        unsafe {
+            let config = FfiRuntimeConfig {
+                tokio_worker_threads: 2,
+            };
+            let mut fs = ptr::null_mut();
+            expect_ok(slatedb_fs_create_memory(ptr::null(), &config, &mut fs));
+            assert_eq!((*fs).runtime.metrics().num_workers(), 2);
+            slatedb_fs_destroy(fs);
         }
     }
 
