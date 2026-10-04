@@ -28,15 +28,6 @@ string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name) {
 	return value.GetValue<string>();
 }
 
-template <class T>
-T GetSettingOrDefault(optional_ptr<FileOpener> opener, const string &name, T default_value) {
-	Value value;
-	if (!FileOpener::TryGetCurrentSetting(opener, name, value) || value.IsNull()) {
-		return default_value;
-	}
-	return value.GetValue<T>();
-}
-
 S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener) {
 	if (!opener) {
 		throw InvalidConfigurationException("Cannot initialize object storage without a FileOpener");
@@ -92,10 +83,6 @@ CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener>
 	result.persistent_cache_on_compaction = GetSettingOrDefault<bool>(
 	    opener, "duckdb_objfs_persistent_cache_on_compaction", result.persistent_cache_on_compaction);
 	return result;
-}
-
-uint64_t GetTokioWorkerThreadsSetting(optional_ptr<FileOpener> opener) {
-	return GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_tokio_worker_threads", 0);
 }
 
 void CheckFrozenSlateDBSetting(ClientContext &context, const string &name, const Value &new_value) {

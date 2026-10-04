@@ -111,7 +111,8 @@ SlateDBFileSystem::InitializationConfig SlateDBFileSystem::ReadInitializationCon
 	}
 	result.backend = StringUtil::Lower(result.backend);
 	result.cache = ReadCacheInitializationConfig(opener);
-	result.tokio_worker_threads = GetTokioWorkerThreadsSetting(opener);
+	result.tokio_worker_threads =
+	    GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_tokio_worker_threads", result.tokio_worker_threads);
 	if (result.backend == "local") {
 		result.local_root = GetOptionalSetting(opener, "duckdb_objfs_root");
 		if (result.local_root.empty()) {
