@@ -171,8 +171,8 @@ TEST_CASE("SlateDBFileSystem forwards sync and truncate", "[slatedb_fs]") {
 
 TEST_CASE("SlateDBFileSystem forwards file catalog operations", "[slatedb_fs]") {
 	RunForEachBackend([](SlateDBFileSystem *fs) {
-		const string source = "duckdb_objfs://source.db";
-		const string target = "duckdb_objfs://target.db";
+		const string source = "duckdb_objfs://database.db.wal.checkpoint";
+		const string target = "duckdb_objfs://database.db.wal";
 
 		REQUIRE(!fs->FileExists(source));
 		CreateFile(*fs, source)->Close();

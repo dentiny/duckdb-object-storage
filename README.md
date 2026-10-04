@@ -143,6 +143,10 @@ first `duckdb_objfs://` access. Configure them beforehand: changing any of
 them afterwards fails with an error instead of being silently ignored.
 Restart the database to use different values.
 
+The filesystem's Tokio runtime takes DuckDB's `threads` setting at that point
+as both its worker thread count and its blocking thread limit; later changes
+to `threads` do not resize it.
+
 ## Cache statistics
 
 After the first `duckdb_objfs://` access, query cumulative cache statistics

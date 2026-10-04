@@ -55,20 +55,17 @@ private:
 		string local_root;
 		S3InitializationConfig s3;
 		CacheInitializationConfig cache;
+		RuntimeInitializationConfig runtime;
 	};
 
 	void EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> opener);
-	void InitializeMemory(const DatabaseInitializationConfig &config);
-	void InitializeLocal(const string &root, const DatabaseInitializationConfig &config);
-	void InitializeS3(const S3InitializationConfig &s3_config, const DatabaseInitializationConfig &config);
+	void Initialize(const InitializationConfig &config);
 	InitializationConfig ReadInitializationConfig(optional_ptr<FileOpener> opener);
 	void FreezeSettingsSnapshot(optional_ptr<FileOpener> opener, const InitializationConfig &config);
-	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener, bool read_only);
+	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener);
 
 	mutex initialization_lock;
-	unique_ptr<InitializationConfig> initialization_config;
-	unique_ptr<slatedb_fs, SlateDBFsDeleter> read_write_impl;
-	unique_ptr<slatedb_fs, SlateDBFsDeleter> read_only_impl;
+	unique_ptr<slatedb_fs, SlateDBFsDeleter> impl;
 };
 
 } // namespace duckdb

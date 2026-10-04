@@ -63,10 +63,12 @@ typedef struct slatedb_cache_config {
 	int32_t persistent_cache_on_compaction;
 } slatedb_cache_config;
 
-typedef struct slatedb_db_config {
-	// Open the SlateDB database without acquiring a writer epoch.
-	int32_t read_only;
-} slatedb_db_config;
+typedef struct slatedb_runtime_config {
+	// Tokio worker thread count for async tasks; zero selects Tokio's default.
+	uint64_t async_threads;
+	// Tokio blocking thread limit; zero selects Tokio's default.
+	uint64_t blocking_threads;
+} slatedb_runtime_config;
 
 typedef struct slatedb_cache_stats {
 	// Successful in-memory data-block cache lookups.
@@ -139,12 +141,13 @@ typedef enum slatedb_fs_error_code {
 	SLATEDB_FS_ERROR_IO = 7,
 } slatedb_fs_error_code;
 
-int32_t slatedb_fs_create_memory(const slatedb_cache_config *cache_config, const slatedb_db_config *db_config,
+// A null cache or runtime config selects the defaults.
+int32_t slatedb_fs_create_memory(const slatedb_cache_config *cache_config, const slatedb_runtime_config *runtime_config,
                                  slatedb_fs **output);
 int32_t slatedb_fs_create_local(const char *root, const slatedb_cache_config *cache_config,
-                                const slatedb_db_config *db_config, slatedb_fs **output);
+                                const slatedb_runtime_config *runtime_config, slatedb_fs **output);
 int32_t slatedb_fs_create_s3(const slatedb_s3_config *config, const slatedb_cache_config *cache_config,
-                             const slatedb_db_config *db_config, slatedb_fs **output);
+                             const slatedb_runtime_config *runtime_config, slatedb_fs **output);
 void slatedb_fs_destroy(slatedb_fs *fs);
 int32_t slatedb_fs_get_cache_stats(const slatedb_fs *fs, slatedb_cache_stats *output);
 int32_t slatedb_fs_get_io_stats(const slatedb_fs *fs, slatedb_io_stats *output);

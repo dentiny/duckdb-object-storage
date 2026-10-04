@@ -50,9 +50,11 @@ struct CacheInitializationConfig {
 	bool persistent_cache_on_compaction = false;
 };
 
-struct DatabaseInitializationConfig {
-	CacheInitializationConfig cache;
-	bool read_only = false;
+struct RuntimeInitializationConfig {
+	//! Tokio worker thread count for async tasks; zero selects Tokio's default.
+	uint64_t async_threads = 0;
+	//! Tokio blocking thread limit; zero selects Tokio's default.
+	uint64_t blocking_threads = 0;
 };
 
 // Snapshot of the settings the SlateDB filesystem was initialized with, runtime configs are rejected if they differ
@@ -80,6 +82,7 @@ string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name);
 string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name);
 S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener);
 CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener> opener);
+RuntimeInitializationConfig ReadRuntimeInitializationConfig(optional_ptr<FileOpener> opener);
 
 //! Throws if the SlateDB filesystem is already initialized and `new_value` differs from the value the filesystem was
 //! initialized with.
