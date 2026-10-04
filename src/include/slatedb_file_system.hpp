@@ -55,8 +55,7 @@ private:
 		string local_root;
 		S3InitializationConfig s3;
 		CacheInitializationConfig cache;
-		//! DuckDB's thread count, used to size the Tokio runtime; zero selects Tokio's defaults.
-		uint64_t threads = 0;
+		RuntimeInitializationConfig runtime;
 	};
 
 	void EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> opener);

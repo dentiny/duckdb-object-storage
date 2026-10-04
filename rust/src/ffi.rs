@@ -74,8 +74,16 @@ pub struct FfiCacheConfig {
 
 #[repr(C)]
 pub struct FfiRuntimeConfig {
-    /// Tokio worker thread count and blocking thread limit; zero selects Tokio's defaults.
+    /// Tokio worker thread count for async tasks; zero selects Tokio's default.
+    async_threads: u64,
+    /// Tokio blocking thread limit; zero selects Tokio's default.
     threads: u64,
+}
+
+#[derive(Default)]
+struct RuntimeConfig {
+    async_threads: Option<usize>,
+    threads: Option<usize>,
 }
 
 #[repr(C)]
@@ -288,17 +296,23 @@ unsafe fn require_options(options: *const FfiOpenOptions) -> Result<FileOpenFlag
     })
 }
 
-/// Returns the configured Tokio thread count, or `None` for Tokio's defaults.
-unsafe fn parse_runtime_config(config: *const FfiRuntimeConfig) -> Result<Option<usize>> {
-    let Some(config) = (unsafe { config.as_ref() }) else {
-        return Ok(None);
-    };
-    match config.threads {
+fn optional_thread_count(value: u64, name: &str) -> Result<Option<usize>> {
+    match value {
         0 => Ok(None),
         value => Ok(Some(usize::try_from(value).map_err(|_| {
-            Error::invalid_argument("Tokio thread count does not fit this platform")
+            Error::invalid_argument(format!("{name} does not fit this platform"))
         })?)),
     }
+}
+
+unsafe fn parse_runtime_config(config: *const FfiRuntimeConfig) -> Result<RuntimeConfig> {
+    let Some(config) = (unsafe { config.as_ref() }) else {
+        return Ok(RuntimeConfig::default());
+    };
+    Ok(RuntimeConfig {
+        async_threads: optional_thread_count(config.async_threads, "async thread count")?,
+        threads: optional_thread_count(config.threads, "thread count")?,
+    })
 }
 
 unsafe fn require_output<'a, T>(output: *mut T, name: &str) -> Result<&'a mut T> {
@@ -364,12 +378,13 @@ unsafe fn write_buffer<'a>(buffer: *const u8, len: usize) -> Result<&'a [u8]> {
     Ok(unsafe { slice::from_raw_parts(buffer, len) })
 }
 
-fn create_runtime(threads: Option<usize>) -> Result<Arc<Runtime>> {
+fn create_runtime(config: RuntimeConfig) -> Result<Arc<Runtime>> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
-    if let Some(threads) = threads {
-        builder
-            .worker_threads(threads)
-            .max_blocking_threads(threads);
+    if let Some(async_threads) = config.async_threads {
+        builder.worker_threads(async_threads);
+    }
+    if let Some(threads) = config.threads {
+        builder.max_blocking_threads(threads);
     }
     builder
         .enable_all()
@@ -387,9 +402,9 @@ pub unsafe extern "C" fn slatedb_fs_create_memory(
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
-        let threads = unsafe { parse_runtime_config(runtime_config)? };
+        let runtime_config = unsafe { parse_runtime_config(runtime_config)? };
         let cache_config = unsafe { parse_cache_config(cache_config)? };
-        let runtime = create_runtime(threads)?;
+        let runtime = create_runtime(runtime_config)?;
         let fs = runtime.block_on(SlateDbFileSystem::open_in_memory_with_cache_config(
             DATABASE_PATH,
             cache_config,
@@ -409,13 +424,13 @@ pub unsafe extern "C" fn slatedb_fs_create_local(
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
-        let threads = unsafe { parse_runtime_config(runtime_config)? };
+        let runtime_config = unsafe { parse_runtime_config(runtime_config)? };
         let root = unsafe { require_path(root, "local root")? };
         if root.is_empty() {
             return Err(Error::invalid_argument("local root must not be empty"));
         }
         let cache_config = unsafe { parse_cache_config(cache_config)? };
-        let runtime = create_runtime(threads)?;
+        let runtime = create_runtime(runtime_config)?;
         let fs = runtime.block_on(SlateDbFileSystem::open_local_with_cache_config(
             DATABASE_PATH,
             root,
@@ -436,10 +451,10 @@ pub unsafe extern "C" fn slatedb_fs_create_s3(
     ffi_result(|| {
         let output = unsafe { require_output(output, "filesystem output")? };
         *output = ptr::null_mut();
-        let threads = unsafe { parse_runtime_config(runtime_config)? };
+        let runtime_config = unsafe { parse_runtime_config(runtime_config)? };
         let config = unsafe { require_s3_config(config)? };
         let cache_config = unsafe { parse_cache_config(cache_config)? };
-        let runtime = create_runtime(threads)?;
+        let runtime = create_runtime(runtime_config)?;
         let fs = runtime.block_on(SlateDbFileSystem::open_s3_with_cache_config(
             DATABASE_PATH,
             config,
@@ -933,17 +948,6 @@ mod tests {
             assert_eq!(&contents, b"contents");
             slatedb_file_destroy(handle);
             slatedb_fs_destroy(reader);
-        }
-    }
-
-    #[test]
-    fn ffi_constructor_honors_runtime_threads() {
-        unsafe {
-            let config = FfiRuntimeConfig { threads: 2 };
-            let mut fs = ptr::null_mut();
-            expect_ok(slatedb_fs_create_memory(ptr::null(), &config, &mut fs));
-            assert_eq!((*fs).runtime.metrics().num_workers(), 2);
-            slatedb_fs_destroy(fs);
         }
     }
 

@@ -94,6 +94,19 @@ CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener>
 	return result;
 }
 
+RuntimeInitializationConfig ReadRuntimeInitializationConfig(optional_ptr<FileOpener> opener) {
+	RuntimeInitializationConfig result;
+	auto database = FileOpener::TryGetDatabase(opener);
+	if (!database) {
+		return result;
+	}
+	auto threads = DBConfig::GetConfig(*database).options.maximum_threads;
+	// DuckDB v1.5 has no async thread setting, so async tasks also use its thread count.
+	result.async_threads = threads;
+	result.threads = threads;
+	return result;
+}
+
 void CheckFrozenSlateDBSetting(ClientContext &context, const string &name, const Value &new_value) {
 	auto frozen = context.db->GetObjectCache().Get<FrozenSlateDBSettings>(FrozenSlateDBSettings::CACHE_KEY);
 	if (!frozen) {

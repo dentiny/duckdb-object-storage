@@ -77,7 +77,7 @@ unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocal(const string &root)
 
 void SlateDBFileSystem::Initialize(const InitializationConfig &config) {
 	auto ffi_cache = ConvertCacheConfig(config.cache);
-	slatedb_runtime_config ffi_runtime {config.threads};
+	slatedb_runtime_config ffi_runtime {config.runtime.async_threads, config.runtime.threads};
 	slatedb_fs *ptr = nullptr;
 	if (config.backend == "memory") {
 		ThrowSlateDBError(slatedb_fs_create_memory(&ffi_cache, &ffi_runtime, &ptr),
@@ -106,10 +106,7 @@ SlateDBFileSystem::InitializationConfig SlateDBFileSystem::ReadInitializationCon
 	}
 	result.backend = StringUtil::Lower(result.backend);
 	result.cache = ReadCacheInitializationConfig(opener);
-	auto database = FileOpener::TryGetDatabase(opener);
-	if (database) {
-		result.threads = DBConfig::GetConfig(*database).options.maximum_threads;
-	}
+	result.runtime = ReadRuntimeInitializationConfig(opener);
 	if (result.backend == "local") {
 		result.local_root = GetOptionalSetting(opener, "duckdb_objfs_root");
 		if (result.local_root.empty()) {
