@@ -1,0 +1,20 @@
+{
+  "description": "DuckDB tests that need functionality duckdb_object_storage does not provide yet. Remove entries once the feature lands.",
+  "skip_tests": [
+    {
+      "reason": "Opening a DuckDB database file that was not written through duckdb_objfs://: 'load <file> readonly' maps to a read-only duckdb_objfs://mapped_<hash>.db, which does not exist because fixture databases, unzipped files and files written through a local ATTACH are never imported into object storage.",
+      "paths": [
+        "test/sql/attach/attach_read_only.test",
+        "test/sql/function/list/lambdas/test_lambda_storage.test",
+        "test/sql/index/art/storage/test_art_duckdb_versions.test",
+        "test/sql/storage/bc/internal_schemas_0102.test",
+        "test/sql/storage/bc/test_broken_view_v092.test",
+        "test/sql/storage/bc/test_view_v092.test",
+        "test/sql/storage/compression/patas/patas_corrupted_file.test",
+        "test/sql/storage/compression/rle/rle_corrupted_count_offset.test",
+        "test/sql/storage/unzip.test",
+        "test/sql/storage/wal/test_wal_bc.test"
+      ]
+    }
+  ]
+}

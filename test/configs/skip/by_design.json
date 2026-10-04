@@ -1,0 +1,84 @@
+{
+  "description": "DuckDB tests that cannot pass by design: the SlateDB test configs run every test inside an attached duckdb_objfs:// catalog instead of DuckDB's default database, and the extension's own tests expect to configure the filesystem themselves. These fail the same way when the attached catalog is a plain local DuckDB file.",
+  "skip_tests": [
+    {
+      "reason": "Tests run in the attached catalog '__test__config__slatedb', but these tests expect the default catalog to be named 'memory' (CURRENT_CATALOG, SHOW ALL TABLES, DESCRIBE), reference memory.* or memory.temp explicitly, COPY FROM DATABASE memory, or expect 'main' as the current schema and search path.",
+      "paths": [
+        "test/fuzzer/sqlsmith/current_schemas_null.test",
+        "test/sql/alter/add_pk/test_add_pk_attach.test",
+        "test/sql/attach/attach_default_table.test",
+        "test/sql/attach/attach_did_you_mean.test",
+        "test/sql/attach/attach_show_all_tables.test",
+        "test/sql/attach/attach_table_info.test",
+        "test/sql/attach/attach_views.test",
+        "test/sql/catalog/comment_on_column.test",
+        "test/sql/catalog/function/attached_macro.test",
+        "test/sql/catalog/function/test_table_macro_copy.test",
+        "test/sql/catalog/test_set_search_path.test",
+        "test/sql/catalog/test_temporary.test",
+        "test/sql/copy_database/copy_database_gen_col.test",
+        "test/sql/copy_database/copy_table_with_sequence.test",
+        "test/sql/pg_catalog/system_functions.test",
+        "test/sql/pragma/test_show_tables_temp_views.test",
+        "test/sql/settings/drop_set_schema.test",
+        "test/sql/show_select/test_describe_all.test"
+      ]
+    },
+    {
+      "reason": "The test's default database stays attached next to '__test__config__slatedb', so SHOW DATABASES/SCHEMAS, duckdb_databases(), pragma_database_list and pragma_database_size() return an extra database.",
+      "paths": [
+        "test/sql/attach/show_databases.test",
+        "test/sql/attach/show_schemas.test",
+        "test/sql/index/art/storage/test_art_auto_checkpoint.test",
+        "test/sql/index/art/storage/test_art_checkpoint.test",
+        "test/sql/pragma/test_pragma_database_list.test",
+        "test/sql/storage/optimistic_write/optimistic_write_not_trigger_checkpoint.test",
+        "test/sql/storage/optimistic_write/optimistic_write_temp_table.test",
+        "test/sql/storage/partial_blocks/many_columns_rle.test",
+        "test/sql/storage/partial_blocks/many_columns_storage.test",
+        "test/sql/storage/partial_blocks/many_columns_strings.test",
+        "test/sql/storage/partial_blocks/many_columns_validity.test",
+        "test/sql/storage/read_duckdb/read_duckdb_basic.test",
+        "test/sql/storage/test_index_checkpoint.test",
+        "test/sql/table_function/duckdb_databases.test",
+        "test/sql/transactions/concurrent_drop_table.test"
+      ]
+    },
+    {
+      "reason": "The attached database uses DuckDB's default persistent storage version (v1.0.0), which rejects VARIANT columns and does not keep GEOMETRY statistics; the tests assume the in-memory default database.",
+      "paths": [
+        "test/parquet/variant/variant_comparison.test",
+        "test/parquet/variant/variant_small_decimal.test",
+        "test/sql/function/variant/variant_typeof.test",
+        "test/sql/storage/types/variant/index_fetch.test",
+        "test/sql/storage/types/variant/update.test",
+        "test/sql/types/geo/geometry_stats.test",
+        "test/sql/types/geo/geometry_stats_prune_null.test",
+        "test/sql/types/variant/variant_map_to_variant_filter.test"
+      ]
+    },
+    {
+      "reason": "PRAGMA checkpoint_abort is aimed at the default database, but the aborted checkpoint invalidates '__test__config__slatedb', which every later statement uses.",
+      "paths": [
+        "test/fuzzer/pedro/incomplete_checkpoint.test",
+        "test/sql/storage/attach/attach_invalidation_default_db.test",
+        "test/sql/storage/checkpoint/initial_database_autocheckpoint_failure.test"
+      ]
+    },
+    {
+      "reason": "The test sets a 1 MiB memory_limit, which the additional attached database exhausts.",
+      "paths": [
+        "test/sql/storage/temp_directory/max_swap_space_error.test"
+      ]
+    },
+    {
+      "reason": "Extension tests that set up duckdb_objfs themselves: they expect an uninitialized filesystem, attach the mapped database explicitly, or rely on data surviving a restart (which the memory backend does not provide). They run under 'make test' without the SlateDB test config.",
+      "paths": [
+        "test/sql/duckdb_object_storage_cache.test",
+        "test/sql/duckdb_object_storage_checkpoint_failure.test",
+        "test/sql/duckdb_object_storage_io_stats.test",
+        "test/sql/duckdb_object_storage_mapped_load.test"
+      ]
+    }
+  ]
+}
