@@ -32,6 +32,13 @@
 
 * To run all the SQL tests, run `make test` (or `make test_debug` for debug build binaries).
 * To run all C++ tests, run `make test_unit` (or `test_debug_unit` for debug build binaries).
+* To run DuckDB's own SQL tests against the SlateDB filesystem, run `make test_release_duckdb` (local backend) or `make test_release_duckdb "[memory]"`. Pass a test filter as an extra argument, for example `make test_release_duckdb "test/sql/attach/*"`.
+* DuckDB tests that cannot pass are skipped through the lists in `test/configs/skip/`:
+  * `extension_bugs.json`: defects in this extension; reference a tracking issue and remove the entry with the fix.
+  * `unsupported_features.json`: functionality the extension does not provide yet.
+  * `by_design.json`: tests that conflict with running inside an attached `duckdb_objfs://` catalog, and the extension's own tests that set up the filesystem themselves.
+* `make test_release_duckdb_skipped` runs every skip-listed test under the local and memory configs and fails if one passes under both, so stale entries get removed. Set `DUCKDB_SKIP_LISTS=extension_bugs` to check a single list.
+* `make test_release_duckdb_survey` runs the whole DuckDB suite with the skip lists disabled, one process per test, and reports failures that no list covers. Use it after upgrading DuckDB to classify new failures. `make lint_duckdb_skip_lists` validates the list files.
 
 ## Formatting
 

@@ -1,0 +1,3 @@
+{
+  "description": "DuckDB tests that fail because of a defect in duckdb_object_storage. Every entry should reference a tracking issue in its reason and be removed once the bug is fixed. Add a \"skip_tests\" list in the same format as the other skip lists; DuckDB cannot parse an empty one."
+}
