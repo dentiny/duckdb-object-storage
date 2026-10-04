@@ -82,12 +82,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("duckdb_objfs_persistent_cache_on_compaction",
 	                          "Populate the persistent cache from compaction output", LogicalType::BOOLEAN,
 	                          Value(false), SLATEDB_FREEZE_GUARD("duckdb_objfs_persistent_cache_on_compaction"));
-
-	// Async runtime configuration.
-	config.AddExtensionOption("duckdb_objfs_tokio_worker_threads",
-	                          "Tokio runtime worker thread count; zero selects the CPU count", LogicalType::UBIGINT,
-	                          Value::UBIGINT(0), SLATEDB_FREEZE_GUARD("duckdb_objfs_tokio_worker_threads"));
-
 	auto file_system = make_uniq<SlateDBFileSystem>();
 	loader.RegisterFunction(GetSlateDBCacheStatsFunction(*file_system));
 	loader.RegisterFunction(GetSlateDBIoStatsFunction(*file_system));

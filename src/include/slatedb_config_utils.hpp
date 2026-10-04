@@ -2,13 +2,13 @@
 
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/file_opener.hpp"
-#include "duckdb/common/types/value.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
 
 // Forward declarations
 class ClientContext;
+class Value;
 
 struct S3InitializationConfig {
 	//! S3 bucket that stores SlateDB objects.
@@ -73,16 +73,6 @@ struct FrozenSlateDBSettings : public ObjectCacheEntry {
 
 string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name);
 string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name);
-
-template <class T>
-T GetSettingOrDefault(optional_ptr<FileOpener> opener, const string &name, T default_value) {
-	Value value;
-	if (!FileOpener::TryGetCurrentSetting(opener, name, value) || value.IsNull()) {
-		return default_value;
-	}
-	return value.GetValue<T>();
-}
-
 S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener);
 CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener> opener);
 

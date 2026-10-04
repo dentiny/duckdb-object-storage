@@ -137,20 +137,15 @@ SET duckdb_objfs_persistent_cache_on_compaction = false;
 
 The part size must be a non-zero multiple of 1024 bytes.
 
-## Runtime configuration
-
-The filesystem drives SlateDB and object-store I/O on a Tokio runtime. By
-default it starts one worker thread per CPU core. To cap it:
-
-```sql
-SET duckdb_objfs_tokio_worker_threads = 4;   -- 0 (default) selects the CPU count
-```
-
-All `duckdb_objfs_*` settings — the backend, root, bucket, the cache
-settings, and the Tokio worker thread count above — are read once when the filesystem is initialized, at the
+All `duckdb_objfs_*` settings — the backend, root, bucket, and the cache
+settings above — are read once when the filesystem is initialized, at the
 first `duckdb_objfs://` access. Configure them beforehand: changing any of
 them afterwards fails with an error instead of being silently ignored.
 Restart the database to use different values.
+
+The filesystem's Tokio runtime takes DuckDB's `threads` setting at that point
+as both its worker thread count and its blocking thread limit; later changes
+to `threads` do not resize it.
 
 ## Cache statistics
 

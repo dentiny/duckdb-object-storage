@@ -47,11 +47,6 @@ slatedb_cache_config ConvertCacheConfig(const CacheInitializationConfig &config)
 	        config.persistent_cache_on_flush,
 	        config.persistent_cache_on_compaction};
 }
-
-slatedb_runtime_config ConvertRuntimeConfig(uint64_t tokio_worker_threads) {
-	return {tokio_worker_threads};
-}
-
 } // namespace
 
 void SlateDBFsDeleter::operator()(slatedb_fs *ptr) const {
@@ -82,7 +77,7 @@ unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocal(const string &root)
 
 void SlateDBFileSystem::Initialize(const InitializationConfig &config) {
 	auto ffi_cache = ConvertCacheConfig(config.cache);
-	auto ffi_runtime = ConvertRuntimeConfig(config.tokio_worker_threads);
+	slatedb_runtime_config ffi_runtime {config.threads};
 	slatedb_fs *ptr = nullptr;
 	if (config.backend == "memory") {
 		ThrowSlateDBError(slatedb_fs_create_memory(&ffi_cache, &ffi_runtime, &ptr),
@@ -111,8 +106,10 @@ SlateDBFileSystem::InitializationConfig SlateDBFileSystem::ReadInitializationCon
 	}
 	result.backend = StringUtil::Lower(result.backend);
 	result.cache = ReadCacheInitializationConfig(opener);
-	result.tokio_worker_threads =
-	    GetSettingOrDefault<uint64_t>(opener, "duckdb_objfs_tokio_worker_threads", result.tokio_worker_threads);
+	auto database = FileOpener::TryGetDatabase(opener);
+	if (database) {
+		result.threads = DBConfig::GetConfig(*database).options.maximum_threads;
+	}
 	if (result.backend == "local") {
 		result.local_root = GetOptionalSetting(opener, "duckdb_objfs_root");
 		if (result.local_root.empty()) {
@@ -172,7 +169,6 @@ void SlateDBFileSystem::FreezeSettingsSnapshot(optional_ptr<FileOpener> opener, 
 	    Value::BOOLEAN(config.cache.persistent_cache_on_flush).ToString();
 	values["duckdb_objfs_persistent_cache_on_compaction"] =
 	    Value::BOOLEAN(config.cache.persistent_cache_on_compaction).ToString();
-	values["duckdb_objfs_tokio_worker_threads"] = Value::UBIGINT(config.tokio_worker_threads).ToString();
 	database->GetObjectCache().Put(FrozenSlateDBSettings::CACHE_KEY, std::move(frozen));
 }
 

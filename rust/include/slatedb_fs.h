@@ -64,8 +64,8 @@ typedef struct slatedb_cache_config {
 } slatedb_cache_config;
 
 typedef struct slatedb_runtime_config {
-	// Number of Tokio runtime worker threads; zero selects the CPU count.
-	uint64_t tokio_worker_threads;
+	// Tokio worker thread count and blocking thread limit; zero selects Tokio's defaults.
+	uint64_t threads;
 } slatedb_runtime_config;
 
 typedef struct slatedb_cache_stats {
