@@ -77,13 +77,13 @@ pub struct FfiRuntimeConfig {
     /// Tokio worker thread count for async tasks; zero selects Tokio's default.
     async_threads: u64,
     /// Tokio blocking thread limit; zero selects Tokio's default.
-    threads: u64,
+    blocking_threads: u64,
 }
 
 #[derive(Default)]
 struct RuntimeConfig {
     async_threads: Option<usize>,
-    threads: Option<usize>,
+    blocking_threads: Option<usize>,
 }
 
 #[repr(C)]
@@ -311,7 +311,7 @@ unsafe fn parse_runtime_config(config: *const FfiRuntimeConfig) -> Result<Runtim
     };
     Ok(RuntimeConfig {
         async_threads: optional_thread_count(config.async_threads, "async thread count")?,
-        threads: optional_thread_count(config.threads, "thread count")?,
+        blocking_threads: optional_thread_count(config.blocking_threads, "blocking thread count")?,
     })
 }
 
@@ -383,8 +383,8 @@ fn create_runtime(config: RuntimeConfig) -> Result<Arc<Runtime>> {
     if let Some(async_threads) = config.async_threads {
         builder.worker_threads(async_threads);
     }
-    if let Some(threads) = config.threads {
-        builder.max_blocking_threads(threads);
+    if let Some(blocking_threads) = config.blocking_threads {
+        builder.max_blocking_threads(blocking_threads);
     }
     builder
         .enable_all()

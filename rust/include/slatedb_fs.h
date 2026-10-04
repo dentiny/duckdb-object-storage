@@ -67,7 +67,7 @@ typedef struct slatedb_runtime_config {
 	// Tokio worker thread count for async tasks; zero selects Tokio's default.
 	uint64_t async_threads;
 	// Tokio blocking thread limit; zero selects Tokio's default.
-	uint64_t threads;
+	uint64_t blocking_threads;
 } slatedb_runtime_config;
 
 typedef struct slatedb_cache_stats {

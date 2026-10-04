@@ -103,7 +103,7 @@ RuntimeInitializationConfig ReadRuntimeInitializationConfig(optional_ptr<FileOpe
 	auto threads = DBConfig::GetConfig(*database).options.maximum_threads;
 	// DuckDB v1.5 has no async thread setting, so async tasks also use its thread count.
 	result.async_threads = threads;
-	result.threads = threads;
+	result.blocking_threads = threads;
 	return result;
 }
 

@@ -54,7 +54,7 @@ struct RuntimeInitializationConfig {
 	//! Tokio worker thread count for async tasks; zero selects Tokio's default.
 	uint64_t async_threads = 0;
 	//! Tokio blocking thread limit; zero selects Tokio's default.
-	uint64_t threads = 0;
+	uint64_t blocking_threads = 0;
 };
 
 // Snapshot of the settings the SlateDB filesystem was initialized with, runtime configs are rejected if they differ

@@ -77,7 +77,7 @@ unique_ptr<SlateDBFileSystem> SlateDBFileSystem::CreateLocal(const string &root)
 
 void SlateDBFileSystem::Initialize(const InitializationConfig &config) {
 	auto ffi_cache = ConvertCacheConfig(config.cache);
-	slatedb_runtime_config ffi_runtime {config.runtime.async_threads, config.runtime.threads};
+	slatedb_runtime_config ffi_runtime {config.runtime.async_threads, config.runtime.blocking_threads};
 	slatedb_fs *ptr = nullptr;
 	if (config.backend == "memory") {
 		ThrowSlateDBError(slatedb_fs_create_memory(&ffi_cache, &ffi_runtime, &ptr),
