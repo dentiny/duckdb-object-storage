@@ -36,6 +36,8 @@ const DATABASE_COMPANION_SUFFIXES: [&str; 3] = [".wal", ".wal.checkpoint", ".wal
 /// a file is written, removed, or moved.
 pub struct SlateDbFileSystem {
     database_path: String,
+    /// Identifies the backing store, so cache IDs differ across buckets and roots.
+    store_location: String,
     object_store: Arc<dyn ObjectStore>,
     cache_config: CacheConfig,
     db_cache: Option<Arc<dyn DbCache>>,
@@ -88,11 +90,14 @@ impl SlateDbFileSystem {
             return Err(Error::invalid_argument("database path must not be empty"));
         }
 
+        let info = operator.info();
+        let store_location = format!("{}://{}{}", info.scheme(), info.name(), info.root());
         let io_metrics = Arc::new(IoMetrics::default());
         let operator = operator.layer(IoMetricsLayer::new(Arc::clone(&io_metrics)));
         let db_cache = cache_config.build_db_cache();
         Ok(Self {
             database_path: database_path.to_string(),
+            store_location,
             object_store: Arc::new(SlateDbObjectStore::new(operator)),
             cache_config,
             db_cache,
@@ -378,6 +383,17 @@ impl SlateDbFileSystem {
         format!("{}/{group}", self.database_path)
     }
 
+    /// SlateDB scopes shared-cache entries by this ID. It must be unique per
+    /// database, identical for its writer and readers, and stable across
+    /// processes so a persistent cache can be recovered.
+    fn db_cache_id(&self, group: &str) -> u64 {
+        stable_hash(&format!(
+            "{}|{}",
+            self.store_location,
+            self.slatedb_path(group)
+        ))
+    }
+
     async fn open_writer(&self, group: &str) -> Result<Arc<Db>> {
         let settings = Settings {
             object_store_cache_options: self.cache_config.object_store_cache_options(),
@@ -387,7 +403,9 @@ impl SlateDbFileSystem {
             .with_settings(settings)
             .with_metrics_recorder(self.cache_metrics.recorder());
         match &self.db_cache {
-            Some(cache) => builder = builder.with_db_cache(Arc::clone(cache)),
+            Some(cache) => {
+                builder = builder.with_db_cache(Arc::clone(cache), self.db_cache_id(group))
+            }
             None => builder = builder.with_db_cache_disabled(),
         }
         Ok(Arc::new(builder.build().await?))
@@ -405,7 +423,9 @@ impl SlateDbFileSystem {
                 .with_options(options)
                 .with_metrics_recorder(self.cache_metrics.recorder());
         match &self.db_cache {
-            Some(cache) => builder = builder.with_db_cache(Arc::clone(cache)),
+            Some(cache) => {
+                builder = builder.with_db_cache(Arc::clone(cache), self.db_cache_id(group))
+            }
             None => builder = builder.with_db_cache_disabled(),
         }
         match builder.build().await {
@@ -421,6 +441,14 @@ impl SlateDbFileSystem {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+/// 64-bit FNV-1a. Unlike `DefaultHasher`, its output never changes between
+/// Rust releases.
+fn stable_hash(value: &str) -> u64 {
+    value.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
 }
 
 /// Name of the database a logical file belongs to. Known DuckDB companion
@@ -1043,6 +1071,26 @@ mod tests {
         assert!(fs.file_exists("source.db").await.expect("source lookup"));
 
         fs.close().await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn db_cache_ids_are_stable_and_scoped_per_database() {
+        assert_eq!(stable_hash(""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(stable_hash("a"), 0xaf63_dc4c_8601_ec8c);
+
+        let root = tempdir().expect("temporary object-store root");
+        let other_root = tempdir().expect("second object-store root");
+        let mut first = open_local_fs("cache-id", root.path()).await;
+        let mut reopened = open_local_fs("cache-id", root.path()).await;
+        let mut elsewhere = open_local_fs("cache-id", other_root.path()).await;
+
+        assert_eq!(first.db_cache_id("a.db"), reopened.db_cache_id("a.db"));
+        assert_ne!(first.db_cache_id("a.db"), first.db_cache_id("b.db"));
+        assert_ne!(first.db_cache_id("a.db"), elsewhere.db_cache_id("a.db"));
+
+        first.close().await.expect("close first");
+        reopened.close().await.expect("close reopened");
+        elsewhere.close().await.expect("close elsewhere");
     }
 
     #[tokio::test]
