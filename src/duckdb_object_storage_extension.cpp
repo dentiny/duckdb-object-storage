@@ -50,11 +50,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &config = DBConfig::GetConfig(instance);
 
 	// Storage backend configuration.
-	config.AddExtensionOption("duckdb_objfs_backend", "Storage backend: s3, local, or memory", LogicalType::VARCHAR,
+	config.AddExtensionOption("duckdb_objfs_backend", "Storage backend: s3, azure, local, or memory", LogicalType::VARCHAR,
 	                          Value("local"), SLATEDB_FREEZE_GUARD("duckdb_objfs_backend"));
-	config.AddExtensionOption("duckdb_objfs_bucket", "S3 bucket used by the DuckDB object filesystem",
+	config.AddExtensionOption("duckdb_objfs_bucket", "S3 bucket or Azure container (OneLake: workspace) used by the DuckDB object filesystem",
 	                          LogicalType::VARCHAR, Value(), SLATEDB_FREEZE_GUARD("duckdb_objfs_bucket"));
-	config.AddExtensionOption("duckdb_objfs_root", "Local directory or S3 object prefix used by the filesystem",
+	config.AddExtensionOption("duckdb_objfs_root", "Local directory, or S3/Azure object prefix used by the filesystem",
 	                          LogicalType::VARCHAR, Value(), SLATEDB_FREEZE_GUARD("duckdb_objfs_root"));
 
 	// Cache configuration.

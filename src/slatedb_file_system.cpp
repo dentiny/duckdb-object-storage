@@ -85,6 +85,12 @@ void SlateDBFileSystem::Initialize(const InitializationConfig &config) {
 	} else if (config.backend == "local") {
 		ThrowSlateDBError(slatedb_fs_create_local(config.local_root.c_str(), &ffi_cache, &ffi_runtime, &ptr),
 		                  "initialize local SlateDB filesystem");
+	} else if (config.backend == "azure") {
+		auto &azure = config.azure;
+		slatedb_azure_config ffi_azure {azure.container.c_str(), azure.root.c_str(), azure.endpoint.c_str(),
+		                                azure.bearer_token.c_str()};
+		ThrowSlateDBError(slatedb_fs_create_azure(&ffi_azure, &ffi_cache, &ffi_runtime, &ptr),
+		                  "initialize Azure-backed SlateDB filesystem");
 	} else {
 		D_ASSERT(config.backend == "s3");
 		auto &s3 = config.s3;
@@ -114,8 +120,11 @@ SlateDBFileSystem::InitializationConfig SlateDBFileSystem::ReadInitializationCon
 		}
 	} else if (result.backend == "s3") {
 		result.s3 = ReadS3InitializationConfig(opener);
+	} else if (result.backend == "azure") {
+		result.azure = ReadAzureInitializationConfig(opener);
 	} else if (result.backend != "memory") {
-		throw InvalidConfigurationException("Unsupported duckdb_objfs backend '%s'; expected s3, local, or memory",
+		throw InvalidConfigurationException(
+		    "Unsupported duckdb_objfs backend '%s'; expected s3, azure, local, or memory",
 		                                    result.backend);
 	}
 	return result;
@@ -151,10 +160,14 @@ void SlateDBFileSystem::FreezeSettingsSnapshot(optional_ptr<FileOpener> opener, 
 		values["duckdb_objfs_root"] = config.local_root;
 	} else if (config.backend == "s3") {
 		values["duckdb_objfs_root"] = config.s3.root;
+	} else if (config.backend == "azure") {
+		values["duckdb_objfs_root"] = config.azure.root;
 	} else {
 		values["duckdb_objfs_root"] = GetOptionalSetting(opener, "duckdb_objfs_root");
 	}
-	values["duckdb_objfs_bucket"] = config.backend == "s3" ? config.s3.bucket : "";
+	values["duckdb_objfs_bucket"] = config.backend == "s3"      ? config.s3.bucket
+	                                : config.backend == "azure" ? config.azure.container
+	                                                            : "";
 	values["duckdb_objfs_memory_cache_size"] = Value::UBIGINT(config.cache.block_cache_size_bytes).ToString();
 	values["duckdb_objfs_metadata_cache_size"] = Value::UBIGINT(config.cache.metadata_cache_size_bytes).ToString();
 	values["duckdb_objfs_cache_shards"] = Value::UBIGINT(config.cache.cache_shards).ToString();

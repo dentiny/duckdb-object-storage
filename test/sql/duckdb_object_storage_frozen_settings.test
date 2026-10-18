@@ -37,6 +37,11 @@ SET duckdb_objfs_backend = 's3'
 Cannot change setting 'duckdb_objfs_backend'
 
 statement error
+SET duckdb_objfs_backend = 'azure'
+----
+Cannot change setting 'duckdb_objfs_backend'
+
+statement error
 SET duckdb_objfs_memory_cache_size = 1024
 ----
 Cannot change setting 'duckdb_objfs_memory_cache_size'

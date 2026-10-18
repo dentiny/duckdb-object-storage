@@ -96,6 +96,33 @@ secret created with `PROVIDER credential_chain` works as well — DuckDB
 resolves the chain (environment, config files, instance metadata) when the
 secret is created and materializes the credentials the extension reads.
 
+## Azure Blob / OneLake backend
+
+The `azure` backend uses OpenDAL's Azure Blob service and authenticates with an
+Entra ID bearer token (audience `https://storage.azure.com`) from a `TYPE AZURE`
+secret, registered by DuckDB's `azure` extension. `duckdb_objfs_bucket` is the
+container; for Microsoft OneLake that is the workspace, and the root starts with
+the item:
+
+```sql
+INSTALL azure;
+LOAD azure;
+LOAD duckdb_object_storage;
+
+CREATE SECRET (TYPE AZURE, PROVIDER ACCESS_TOKEN, ACCESS_TOKEN '<token>');
+
+SET duckdb_objfs_backend = 'azure';
+SET duckdb_objfs_bucket = 'my_workspace';
+SET duckdb_objfs_root = 'my_lakehouse.Lakehouse/Files/duckdb';
+
+ATTACH 'duckdb_objfs://database.db' AS object_db;
+```
+
+The endpoint defaults to `onelake.blob.fabric.microsoft.com`. Set `ENDPOINT` or
+`ACCOUNT_NAME` on the secret for an Azure storage account. DFS endpoints are
+rewritten to Blob, because only the Blob API makes conditional puts atomic. The
+token is read once at initialization and is not refreshed.
+
 ## Cache configuration
 
 The extension enables SlateDB's Foyer in-memory cache by default. Data blocks

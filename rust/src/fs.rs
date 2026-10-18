@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use opendal::services::{Fs, Memory, S3};
+use opendal::services::{Azblob, Fs, Memory, S3};
 use opendal::Operator;
+use reqsign_azure_storage::StaticCredentialProvider;
+use reqsign_core::ProvideCredentialChain;
 use slatedb::config::{DbReaderOptions, Settings};
 use slatedb::db_cache::DbCache;
 use slatedb::object_store::ObjectStore;
@@ -75,6 +77,22 @@ pub struct S3StorageConfig {
     pub virtual_host_style: bool,
 }
 
+/// Azure Blob storage, including Microsoft OneLake through its Blob endpoint.
+///
+/// For OneLake the container is the workspace and the root starts with the
+/// item, e.g. `mylakehouse.Lakehouse/Files/duckdb`. Batch deletes only work
+/// when the container is the workspace.
+pub struct AzureStorageConfig {
+    /// Blob container (OneLake: workspace name or ID).
+    pub container: String,
+    /// Optional prefix within the container reserved for this filesystem.
+    pub root: Option<String>,
+    /// Blob service endpoint, e.g. `https://onelake.blob.fabric.microsoft.com`.
+    pub endpoint: String,
+    /// Entra ID bearer token for the `https://storage.azure.com` audience.
+    pub bearer_token: String,
+}
+
 impl SlateDbFileSystem {
     /// Opens SlateDB on top of an OpenDAL storage operator.
     pub async fn open(database_path: &str, operator: Operator) -> Result<Self> {
@@ -119,6 +137,20 @@ impl SlateDbFileSystem {
         cache_config: CacheConfig,
     ) -> Result<Self> {
         let operator = build_s3_operator(config)?;
+        Self::open_with_cache_config(database_path, operator, cache_config).await
+    }
+
+    pub async fn open_azure(database_path: &str, config: AzureStorageConfig) -> Result<Self> {
+        let operator = build_azure_operator(config)?;
+        Self::open(database_path, operator).await
+    }
+
+    pub(crate) async fn open_azure_with_cache_config(
+        database_path: &str,
+        config: AzureStorageConfig,
+        cache_config: CacheConfig,
+    ) -> Result<Self> {
+        let operator = build_azure_operator(config)?;
         Self::open_with_cache_config(database_path, operator, cache_config).await
     }
 
@@ -524,6 +556,40 @@ fn build_s3_operator(config: S3StorageConfig) -> Result<Operator> {
         .map_err(|source| Error::io_with_source("failed to initialize OpenDAL S3 storage", source))
 }
 
+fn build_azure_operator(config: AzureStorageConfig) -> Result<Operator> {
+    if config.container.is_empty() {
+        return Err(Error::invalid_argument("Azure container must not be empty"));
+    }
+    if config.endpoint.is_empty() {
+        return Err(Error::invalid_argument("Azure endpoint must not be empty"));
+    }
+    if config.bearer_token.is_empty() {
+        return Err(Error::invalid_argument("Azure bearer token must not be empty"));
+    }
+
+    // Static libraries do not reliably run OpenDAL's process constructor.
+    opendal::install_default();
+
+    let endpoint = if config.endpoint.contains("://") {
+        config.endpoint
+    } else {
+        format!("https://{}", config.endpoint)
+    };
+    // Only the given token is used: no environment, CLI, or metadata lookups.
+    let token = StaticCredentialProvider::new_bearer_token(&config.bearer_token);
+    let credentials = ProvideCredentialChain::new().push(token);
+    let mut builder = Azblob::default()
+        .container(&config.container)
+        .endpoint(&endpoint)
+        .credential_provider_chain(credentials);
+    if let Some(root) = config.root {
+        builder = builder.root(&root);
+    }
+
+    Operator::new(builder)
+        .map_err(|source| Error::io_with_source("failed to initialize OpenDAL azblob", source))
+}
+
 #[cfg(test)]
 mod tests {
     use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -710,30 +776,71 @@ mod tests {
     async fn check_s3_database_persists_across_reopen() {
         let root = tempdir().unwrap();
         let (endpoint, server) = start_fake_s3(root.path()).await;
+        check_database_persists_across_reopen(|| {
+            let config = fake_s3_config(&endpoint);
+            async move {
+                SlateDbFileSystem::open_s3("s3-persistent-db", config).await.unwrap()
+            }
+        })
+        .await;
+        server.abort();
+    }
 
-        let mut first = SlateDbFileSystem::open_s3("s3-persistent-db", fake_s3_config(&endpoint))
-            .await
-            .unwrap();
+    /// Live OneLake round trip. Runs only when `ONELAKE_TOKEN` (a
+    /// `https://storage.azure.com` bearer token) and `ONELAKE_WORKSPACE` and
+    /// `ONELAKE_ROOT` (e.g. `lh.Lakehouse/Files/ci`) are set.
+    #[tokio::test]
+    async fn onelake_database_persists_across_reopen() {
+        let (Ok(token), Ok(workspace), Ok(root)) = (
+            std::env::var("ONELAKE_TOKEN"),
+            std::env::var("ONELAKE_WORKSPACE"),
+            std::env::var("ONELAKE_ROOT"),
+        ) else {
+            eprintln!("skipping: ONELAKE_TOKEN, ONELAKE_WORKSPACE or ONELAKE_ROOT not set");
+            return;
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            check_database_persists_across_reopen(|| {
+                let config = AzureStorageConfig {
+                    container: workspace.clone(),
+                    root: Some(root.clone()),
+                    endpoint: "https://onelake.blob.fabric.microsoft.com".to_string(),
+                    bearer_token: token.clone(),
+                };
+                async move {
+                    SlateDbFileSystem::open_azure("onelake-persistent-db", config).await.unwrap()
+                }
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn check_database_persists_across_reopen<F, Fut>(open: F)
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = SlateDbFileSystem>,
+    {
+        let mut first = open().await;
         let mut created = first
             .open_file("database.db", FileOpenFlags::open_or_create())
             .await
             .unwrap();
-        created.write(b"persisted through S3").await.unwrap();
+        created.write(b"persisted remotely").await.unwrap();
         created.close().await.unwrap();
         drop(created);
         first.close().await.unwrap();
 
-        let mut second = SlateDbFileSystem::open_s3("s3-persistent-db", fake_s3_config(&endpoint))
-            .await
-            .unwrap();
+        let mut second = open().await;
         assert!(second.file_exists("database.db").await.unwrap());
         let mut reopened = second
             .open_file("database.db", FileOpenFlags::read_only())
             .await
             .unwrap();
-        let mut contents = vec![0; "persisted through S3".len()];
+        let mut contents = vec![0; "persisted remotely".len()];
         assert_eq!(reopened.read(&mut contents).await.unwrap(), contents.len());
-        assert_eq!(contents, b"persisted through S3");
+        assert_eq!(contents, b"persisted remotely");
         reopened.close().await.unwrap();
         drop(reopened);
 
@@ -758,8 +865,6 @@ mod tests {
         second.remove_file("database.db.wal").await.unwrap();
         assert!(!second.file_exists("database.db.wal").await.unwrap());
         second.close().await.unwrap();
-
-        server.abort();
     }
 
     #[tokio::test]

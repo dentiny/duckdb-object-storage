@@ -44,6 +44,17 @@ typedef struct slatedb_s3_config {
 	int32_t virtual_host_style;
 } slatedb_s3_config;
 
+typedef struct slatedb_azure_config {
+	// Blob container (OneLake: workspace).
+	const char *container;
+	// Prefix within the container reserved for this filesystem.
+	const char *root;
+	// Blob service endpoint.
+	const char *endpoint;
+	// Entra ID bearer token for the https://storage.azure.com audience.
+	const char *bearer_token;
+} slatedb_azure_config;
+
 typedef struct slatedb_cache_config {
 	// Maximum bytes retained in the in-memory data-block cache; zero disables it.
 	uint64_t block_cache_size_bytes;
@@ -148,6 +159,8 @@ int32_t slatedb_fs_create_local(const char *root, const slatedb_cache_config *ca
                                 const slatedb_runtime_config *runtime_config, slatedb_fs **output);
 int32_t slatedb_fs_create_s3(const slatedb_s3_config *config, const slatedb_cache_config *cache_config,
                              const slatedb_runtime_config *runtime_config, slatedb_fs **output);
+int32_t slatedb_fs_create_azure(const slatedb_azure_config *config, const slatedb_cache_config *cache_config,
+                                const slatedb_runtime_config *runtime_config, slatedb_fs **output);
 void slatedb_fs_destroy(slatedb_fs *fs);
 int32_t slatedb_fs_get_cache_stats(const slatedb_fs *fs, slatedb_cache_stats *output);
 int32_t slatedb_fs_get_io_stats(const slatedb_fs *fs, slatedb_io_stats *output);

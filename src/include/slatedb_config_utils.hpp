@@ -31,6 +31,17 @@ struct S3InitializationConfig {
 	bool virtual_host_style = false;
 };
 
+struct AzureInitializationConfig {
+	//! Blob container (OneLake: workspace) that stores SlateDB objects.
+	string container;
+	//! Prefix within the container (OneLake: starts with the item, e.g. `lh.Lakehouse/Files/...`).
+	string root;
+	//! Blob service endpoint.
+	string endpoint;
+	//! Entra ID bearer token resolved from DuckDB's secret manager.
+	string bearer_token;
+};
+
 struct CacheInitializationConfig {
 	//! Maximum bytes retained in the in-memory data-block cache; zero disables it.
 	uint64_t block_cache_size_bytes = 512ULL * 1024 * 1024;
@@ -81,6 +92,7 @@ struct FrozenSlateDBSettings : public ObjectCacheEntry {
 string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name);
 string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name);
 S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener);
+AzureInitializationConfig ReadAzureInitializationConfig(optional_ptr<FileOpener> opener);
 CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener> opener);
 RuntimeInitializationConfig ReadRuntimeInitializationConfig(optional_ptr<FileOpener> opener);
 

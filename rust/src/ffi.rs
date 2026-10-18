@@ -12,7 +12,7 @@ use crate::cache::CacheConfig;
 use crate::error::{Error, Result};
 use crate::file_handle::FileHandle;
 use crate::flags::FileOpenFlags;
-use crate::fs::{S3StorageConfig, SlateDbFileSystem};
+use crate::fs::{AzureStorageConfig, S3StorageConfig, SlateDbFileSystem};
 
 const DATABASE_PATH: &str = "duckdb-object-storage";
 
@@ -50,6 +50,18 @@ pub struct FfiS3Config {
     use_ssl: i32,
     /// Whether S3 requests should use virtual-host-style addressing.
     virtual_host_style: i32,
+}
+
+#[repr(C)]
+pub struct FfiAzureConfig {
+    /// Blob container (OneLake: workspace).
+    container: *const c_char,
+    /// Prefix within the container reserved for this filesystem.
+    root: *const c_char,
+    /// Blob service endpoint.
+    endpoint: *const c_char,
+    /// Entra ID bearer token for the `https://storage.azure.com` audience.
+    bearer_token: *const c_char,
 }
 
 #[repr(C)]
@@ -238,6 +250,20 @@ unsafe fn require_s3_config(config: *const FfiS3Config) -> Result<S3StorageConfi
         session_token: unsafe { optional_string(config.session_token, "S3 session token")? },
         use_ssl: config.use_ssl != 0,
         virtual_host_style: config.virtual_host_style != 0,
+    })
+}
+
+unsafe fn require_azure_config(config: *const FfiAzureConfig) -> Result<AzureStorageConfig> {
+    let config = unsafe { config.as_ref() }
+        .ok_or_else(|| Error::invalid_argument("Azure config must not be null"))?;
+    let container = unsafe { require_path(config.container, "Azure container")? };
+    let endpoint = unsafe { require_path(config.endpoint, "Azure endpoint")? };
+    let bearer_token = unsafe { require_path(config.bearer_token, "Azure bearer token")? };
+    Ok(AzureStorageConfig {
+        container: container.to_string(),
+        root: unsafe { optional_string(config.root, "Azure root")? },
+        endpoint: endpoint.to_string(),
+        bearer_token: bearer_token.to_string(),
     })
 }
 
@@ -456,6 +482,30 @@ pub unsafe extern "C" fn slatedb_fs_create_s3(
         let cache_config = unsafe { parse_cache_config(cache_config)? };
         let runtime = create_runtime(runtime_config)?;
         let fs = runtime.block_on(SlateDbFileSystem::open_s3_with_cache_config(
+            DATABASE_PATH,
+            config,
+            cache_config,
+        ))?;
+        *output = Box::into_raw(Box::new(FfiFileSystem { runtime, fs }));
+        Ok(())
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn slatedb_fs_create_azure(
+    config: *const FfiAzureConfig,
+    cache_config: *const FfiCacheConfig,
+    runtime_config: *const FfiRuntimeConfig,
+    output: *mut *mut FfiFileSystem,
+) -> i32 {
+    ffi_result(|| {
+        let output = unsafe { require_output(output, "filesystem output")? };
+        *output = ptr::null_mut();
+        let runtime_config = unsafe { parse_runtime_config(runtime_config)? };
+        let config = unsafe { require_azure_config(config)? };
+        let cache_config = unsafe { parse_cache_config(cache_config)? };
+        let runtime = create_runtime(runtime_config)?;
+        let fs = runtime.block_on(SlateDbFileSystem::open_azure_with_cache_config(
             DATABASE_PATH,
             config,
             cache_config,
@@ -875,6 +925,44 @@ mod tests {
             assert!(fs.is_null());
             let message = CStr::from_ptr(slatedb_fs_last_error_message()).to_string_lossy();
             assert!(message.contains("S3 bucket must not be empty"));
+        }
+    }
+
+    #[test]
+    fn ffi_azure_constructor_validates_config() {
+        unsafe {
+            let empty = CString::new("").unwrap();
+            let endpoint = CString::new("https://onelake.blob.fabric.microsoft.com").unwrap();
+            let token = CString::new("token").unwrap();
+            let config = FfiAzureConfig {
+                container: empty.as_ptr(),
+                root: ptr::null(),
+                endpoint: endpoint.as_ptr(),
+                bearer_token: token.as_ptr(),
+            };
+            let mut fs = ptr::null_mut();
+
+            assert_eq!(
+                slatedb_fs_create_azure(&config, ptr::null(), ptr::null(), &mut fs),
+                crate::error::ErrorCode::InvalidArgument as i32
+            );
+            assert!(fs.is_null());
+            let message = CStr::from_ptr(slatedb_fs_last_error_message()).to_string_lossy();
+            assert!(message.contains("Azure container must not be empty"));
+
+            let workspace = CString::new("workspace").unwrap();
+            let config = FfiAzureConfig {
+                container: workspace.as_ptr(),
+                root: ptr::null(),
+                endpoint: endpoint.as_ptr(),
+                bearer_token: empty.as_ptr(),
+            };
+            assert_eq!(
+                slatedb_fs_create_azure(&config, ptr::null(), ptr::null(), &mut fs),
+                crate::error::ErrorCode::InvalidArgument as i32
+            );
+            let message = CStr::from_ptr(slatedb_fs_last_error_message()).to_string_lossy();
+            assert!(message.contains("Azure bearer token must not be empty"));
         }
     }
 
