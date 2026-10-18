@@ -54,6 +54,7 @@ private:
 		string backend;
 		string local_root;
 		S3InitializationConfig s3;
+		AzureInitializationConfig azure;
 		CacheInitializationConfig cache;
 		RuntimeInitializationConfig runtime;
 	};

@@ -75,6 +75,48 @@ S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opene
 	return result;
 }
 
+AzureInitializationConfig ReadAzureInitializationConfig(optional_ptr<FileOpener> opener) {
+	if (!opener) {
+		throw InvalidConfigurationException("Cannot initialize object storage without a FileOpener");
+	}
+
+	AzureInitializationConfig result;
+	result.container = GetRequiredSetting(opener, "duckdb_objfs_bucket");
+	result.root = GetOptionalSetting(opener, "duckdb_objfs_root");
+	if (result.root.empty()) {
+		result.root = "duckdb_objfs";
+	}
+
+	auto scope_root = result.root;
+	while (!scope_root.empty() && scope_root[0] == '/') {
+		scope_root.erase(0, 1);
+	}
+	FileOpenerInfo info {StringUtil::Format("az://%s/%s", result.container, scope_root)};
+	// TYPE AZURE secrets are registered by DuckDB's azure extension (PROVIDER access_token).
+	KeyValueSecretReader secret_reader(*opener, &info, "azure");
+	secret_reader.TryGetSecretKey("access_token", result.bearer_token);
+	string account_name;
+	secret_reader.TryGetSecretKey("account_name", account_name);
+	secret_reader.TryGetSecretKey("endpoint", result.endpoint);
+	if (result.bearer_token.empty()) {
+		throw InvalidConfigurationException(
+		    "The azure backend needs a bearer token: LOAD azure and CREATE SECRET (TYPE AZURE, PROVIDER "
+		    "ACCESS_TOKEN, ACCESS_TOKEN '<token for https://storage.azure.com>')");
+	}
+
+	if (result.endpoint.empty()) {
+		result.endpoint = account_name.empty() ? "onelake.blob.fabric.microsoft.com"
+		                                       : StringUtil::Format("%s.blob.core.windows.net", account_name);
+	}
+	if (!StringUtil::Contains(result.endpoint, "://")) {
+		result.endpoint = "https://" + result.endpoint;
+	}
+	// A DFS write is create + append + flush, so an empty file is visible before the flush; a Blob write is one
+	// conditional request. OpenDAL's azblob service also only speaks the Blob API.
+	result.endpoint = StringUtil::Replace(result.endpoint, ".dfs.", ".blob.");
+	return result;
+}
+
 CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener> opener) {
 	CacheInitializationConfig result;
 	result.block_cache_size_bytes =
@@ -130,7 +172,7 @@ void CheckFrozenSlateDBSetting(ClientContext &context, const string &name, const
 		effective = raw_string;
 		auto &backend = frozen->values.at("duckdb_objfs_backend");
 		if (backend != "memory" && effective.empty()) {
-			effective = backend == "s3" ? "duckdb_objfs" : ".duckdb_objfs";
+			effective = (backend == "s3" || backend == "azure") ? "duckdb_objfs" : ".duckdb_objfs";
 		}
 	} else {
 		effective = new_value.IsNull() ? "" : new_value.ToString();
