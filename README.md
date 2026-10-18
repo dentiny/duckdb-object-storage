@@ -120,8 +120,9 @@ ATTACH 'duckdb_objfs://database.db' AS object_db;
 
 The endpoint defaults to `onelake.blob.fabric.microsoft.com`. Set `ENDPOINT` or
 `ACCOUNT_NAME` on the secret for an Azure storage account. DFS endpoints are
-rewritten to Blob, because only the Blob API makes conditional puts atomic. The
-token is read once at initialization and is not refreshed.
+rewritten to Blob: a DFS write is three requests (create, append, flush), so an
+empty file is visible before the flush, while a Blob write is one conditional
+request. The token is read once at initialization and is not refreshed.
 
 ## Cache configuration
 

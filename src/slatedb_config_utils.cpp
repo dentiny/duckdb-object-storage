@@ -111,7 +111,8 @@ AzureInitializationConfig ReadAzureInitializationConfig(optional_ptr<FileOpener>
 	if (!StringUtil::Contains(result.endpoint, "://")) {
 		result.endpoint = "https://" + result.endpoint;
 	}
-	// Only the Blob API has atomic conditional writes; DFS (ADLS Gen2) creates the file before writing it.
+	// A DFS write is create + append + flush, so an empty file is visible before the flush; a Blob write is one
+	// conditional request. OpenDAL's azblob service also only speaks the Blob API.
 	result.endpoint = StringUtil::Replace(result.endpoint, ".dfs.", ".blob.");
 	return result;
 }
