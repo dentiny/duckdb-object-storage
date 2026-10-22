@@ -84,11 +84,11 @@ Value HitRate(uint64_t hits, uint64_t misses) {
 	return Value::DOUBLE(static_cast<double>(hits) / static_cast<double>(accesses));
 }
 
-void SetCommonValues(DataChunk &output, idx_t row, std::string_view cache, uint64_t hits, uint64_t misses) {
-	output.SetValue(0, row, Value(cache));
-	output.SetValue(1, row, Value::UBIGINT(hits));
-	output.SetValue(2, row, Value::UBIGINT(misses));
-	output.SetValue(3, row, HitRate(hits, misses));
+void AppendCommonValues(DataChunk &output, std::string_view cache, uint64_t hits, uint64_t misses) {
+	output.data[0].Append(Value(cache));
+	output.data[1].Append(Value::UBIGINT(hits));
+	output.data[2].Append(Value::UBIGINT(misses));
+	output.data[3].Append(HitRate(hits, misses));
 }
 
 void CacheStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &output) {
@@ -100,30 +100,30 @@ void CacheStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &o
 	idx_t count = 0;
 	while (state.offset < 3 && count < STANDARD_VECTOR_SIZE) {
 		if (state.offset == 0) {
-			SetCommonValues(output, count, MEMORY_DATA, state.stats.block_cache_hits, state.stats.block_cache_misses);
-			output.SetValue(4, count, Value());
-			output.SetValue(5, count, Value());
-			output.SetValue(6, count, Value());
-			output.SetValue(7, count, Value());
+			AppendCommonValues(output, MEMORY_DATA, state.stats.block_cache_hits, state.stats.block_cache_misses);
+			output.data[4].Append(Value());
+			output.data[5].Append(Value());
+			output.data[6].Append(Value());
+			output.data[7].Append(Value());
 		} else if (state.offset == 1) {
-			SetCommonValues(output, count, MEMORY_METADATA, state.stats.metadata_cache_hits,
-			                state.stats.metadata_cache_misses);
-			output.SetValue(4, count, Value());
-			output.SetValue(5, count, Value());
-			output.SetValue(6, count, Value());
-			output.SetValue(7, count, Value());
+			AppendCommonValues(output, MEMORY_METADATA, state.stats.metadata_cache_hits,
+			                   state.stats.metadata_cache_misses);
+			output.data[4].Append(Value());
+			output.data[5].Append(Value());
+			output.data[6].Append(Value());
+			output.data[7].Append(Value());
 		} else {
-			SetCommonValues(output, count, PERSISTENT, state.stats.persistent_cache_hits,
-			                state.stats.persistent_cache_misses);
-			output.SetValue(4, count, Value::UBIGINT(state.stats.persistent_cache_entries));
-			output.SetValue(5, count, Value::UBIGINT(state.stats.persistent_cache_size_bytes));
-			output.SetValue(6, count, Value::UBIGINT(state.stats.persistent_cache_evictions));
-			output.SetValue(7, count, Value::UBIGINT(state.stats.persistent_cache_evicted_bytes));
+			AppendCommonValues(output, PERSISTENT, state.stats.persistent_cache_hits,
+			                   state.stats.persistent_cache_misses);
+			output.data[4].Append(Value::UBIGINT(state.stats.persistent_cache_entries));
+			output.data[5].Append(Value::UBIGINT(state.stats.persistent_cache_size_bytes));
+			output.data[6].Append(Value::UBIGINT(state.stats.persistent_cache_evictions));
+			output.data[7].Append(Value::UBIGINT(state.stats.persistent_cache_evicted_bytes));
 		}
 		state.offset++;
 		count++;
 	}
-	output.SetCardinality(count);
+	output.CheckCardinality(count);
 }
 
 } // namespace

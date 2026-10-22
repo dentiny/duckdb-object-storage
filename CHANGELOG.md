@@ -2,6 +2,7 @@
 
 ## Fixed
 
+- Append cache and I/O statistics through DuckDB v2 vector APIs to remove deprecated chunk-setter warnings.
 - Preserve frozen-setting diagnostic text when formatting SQL identifiers in DuckDB v2.
 - Include the attached-database definition when resolving mapped database paths in DuckDB v2 builds.
 
