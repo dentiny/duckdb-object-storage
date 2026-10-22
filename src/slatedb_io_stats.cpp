@@ -106,15 +106,15 @@ void IoStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &outp
 			stddev_ms = state.stats.list_stddev_latency_ms;
 		}
 
-		output.SetValue(0, count, Value(OPERATIONS[state.offset]));
-		output.SetValue(1, count, Value::UBIGINT(request_count));
-		output.SetValue(2, count, Value::DOUBLE(average_ms));
-		output.SetValue(3, count, Value::DOUBLE(stddev_ms));
-		output.SetValue(4, count, bytes);
+		output.data[0].Append(Value(OPERATIONS[state.offset]));
+		output.data[1].Append(Value::UBIGINT(request_count));
+		output.data[2].Append(Value::DOUBLE(average_ms));
+		output.data[3].Append(Value::DOUBLE(stddev_ms));
+		output.data[4].Append(bytes);
 		state.offset++;
 		count++;
 	}
-	output.SetCardinality(count);
+	output.CheckCardinality(count);
 }
 
 } // namespace
