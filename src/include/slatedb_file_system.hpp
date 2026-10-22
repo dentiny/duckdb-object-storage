@@ -59,13 +59,13 @@ private:
 	};
 
 	void EnsureTemporaryFilesStayLocal(optional_ptr<FileOpener> opener);
-	void Initialize(const InitializationConfig &config);
+	void Initialize(const InitializationConfig &config) DUCKDB_REQUIRES(initialization_lock);
 	InitializationConfig ReadInitializationConfig(optional_ptr<FileOpener> opener);
 	void FreezeSettingsSnapshot(optional_ptr<FileOpener> opener, const InitializationConfig &config);
 	slatedb_fs *GetOrCreateFileSystem(optional_ptr<FileOpener> opener);
 
-	mutex initialization_lock;
-	unique_ptr<slatedb_fs, SlateDBFsDeleter> impl;
+	annotated_mutex initialization_lock;
+	unique_ptr<slatedb_fs, SlateDBFsDeleter> impl DUCKDB_GUARDED_BY(initialization_lock);
 };
 
 } // namespace duckdb

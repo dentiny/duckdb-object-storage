@@ -3,9 +3,16 @@
 
 #include "duckdb/common/exception.hpp"
 
+#include <string_view>
+
 namespace duckdb {
 
 namespace {
+
+constexpr std::string_view FUNCTION_NAME = "duckdb_objfs_cache_stats";
+constexpr std::string_view MEMORY_DATA = "memory_data";
+constexpr std::string_view MEMORY_METADATA = "memory_metadata";
+constexpr std::string_view PERSISTENT = "persistent";
 
 struct CacheStatsFunctionInfo : TableFunctionInfo {
 	explicit CacheStatsFunctionInfo(SlateDBFileSystem &file_system_p) : file_system(file_system_p) {
@@ -37,7 +44,7 @@ struct CacheStatsGlobalState : GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> CacheStatsBind(ClientContext &, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names.emplace_back("cache");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("hit_count");
@@ -66,7 +73,7 @@ unique_ptr<GlobalTableFunctionState> CacheStatsInit(ClientContext &, TableFuncti
 	auto result = make_uniq<CacheStatsGlobalState>();
 	auto &bind_data = input.bind_data->Cast<CacheStatsBindData>();
 	result->initialized = bind_data.file_system.TryGetCacheStats(result->stats);
-	return std::move(result);
+	return result;
 }
 
 Value HitRate(uint64_t hits, uint64_t misses) {
@@ -77,7 +84,7 @@ Value HitRate(uint64_t hits, uint64_t misses) {
 	return Value::DOUBLE(static_cast<double>(hits) / static_cast<double>(accesses));
 }
 
-void SetCommonValues(DataChunk &output, idx_t row, const char *cache, uint64_t hits, uint64_t misses) {
+void SetCommonValues(DataChunk &output, idx_t row, std::string_view cache, uint64_t hits, uint64_t misses) {
 	output.SetValue(0, row, Value(cache));
 	output.SetValue(1, row, Value::UBIGINT(hits));
 	output.SetValue(2, row, Value::UBIGINT(misses));
@@ -93,20 +100,20 @@ void CacheStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &o
 	idx_t count = 0;
 	while (state.offset < 3 && count < STANDARD_VECTOR_SIZE) {
 		if (state.offset == 0) {
-			SetCommonValues(output, count, "memory_data", state.stats.block_cache_hits, state.stats.block_cache_misses);
+			SetCommonValues(output, count, MEMORY_DATA, state.stats.block_cache_hits, state.stats.block_cache_misses);
 			output.SetValue(4, count, Value());
 			output.SetValue(5, count, Value());
 			output.SetValue(6, count, Value());
 			output.SetValue(7, count, Value());
 		} else if (state.offset == 1) {
-			SetCommonValues(output, count, "memory_metadata", state.stats.metadata_cache_hits,
+			SetCommonValues(output, count, MEMORY_METADATA, state.stats.metadata_cache_hits,
 			                state.stats.metadata_cache_misses);
 			output.SetValue(4, count, Value());
 			output.SetValue(5, count, Value());
 			output.SetValue(6, count, Value());
 			output.SetValue(7, count, Value());
 		} else {
-			SetCommonValues(output, count, "persistent", state.stats.persistent_cache_hits,
+			SetCommonValues(output, count, PERSISTENT, state.stats.persistent_cache_hits,
 			                state.stats.persistent_cache_misses);
 			output.SetValue(4, count, Value::UBIGINT(state.stats.persistent_cache_entries));
 			output.SetValue(5, count, Value::UBIGINT(state.stats.persistent_cache_size_bytes));
@@ -122,7 +129,7 @@ void CacheStatsFunction(ClientContext &, TableFunctionInput &input, DataChunk &o
 } // namespace
 
 TableFunction GetSlateDBCacheStatsFunction(SlateDBFileSystem &file_system) {
-	TableFunction function("duckdb_objfs_cache_stats", {}, CacheStatsFunction, CacheStatsBind, CacheStatsInit);
+	TableFunction function(Identifier(FUNCTION_NAME), {}, CacheStatsFunction, CacheStatsBind, CacheStatsInit);
 	function.function_info = make_shared_ptr<CacheStatsFunctionInfo>(file_system);
 	return function;
 }

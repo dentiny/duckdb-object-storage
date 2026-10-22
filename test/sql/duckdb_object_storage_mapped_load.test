@@ -64,3 +64,18 @@ statement error
 CREATE TABLE rejected(i INTEGER)
 ----
 read-only
+
+# SQLIdentifier must escape a double quote in the requested catalog name.
+statement ok
+USE duckdb_objfs_mapped_load
+
+statement ok
+DETACH mapped_db
+
+statement ok
+PRAGMA duckdb_objfs_attach_mapped_database('mapped "db')
+
+query I
+SELECT * FROM "mapped ""db".main.persisted
+----
+42
