@@ -2,6 +2,7 @@
 
 ## Fixed
 
+- Preserve frozen-setting diagnostic text when formatting SQL identifiers in DuckDB v2.
 - Include the attached-database definition when resolving mapped database paths in DuckDB v2 builds.
 
 ## Changed
