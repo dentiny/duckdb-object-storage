@@ -142,7 +142,7 @@ void CheckFrozenSlateDBSetting(ClientContext &context, const Identifier &name, c
 		throw InvalidConfigurationException(
 		    "Cannot change setting '%s' from '%s' to '%s': the SlateDB filesystem is already initialized. "
 		    "Restart the database to use a different value.",
-		    name, entry->second, effective);
+		    name.GetIdentifierName(), entry->second, effective);
 	}
 }
 
