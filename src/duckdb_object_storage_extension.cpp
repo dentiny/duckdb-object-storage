@@ -6,10 +6,13 @@
 #include "slatedb_file_system.hpp"
 #include "slatedb_io_stats.hpp"
 #include "duckdb/common/crypto/md5.hpp"
+#include "duckdb/common/sql_identifier.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/function/pragma_function.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/database_manager.hpp"
-#include "duckdb/parser/keyword_helper.hpp"
+
+#include <string_view>
 
 namespace duckdb {
 
@@ -20,9 +23,12 @@ namespace duckdb {
 
 namespace {
 
+constexpr std::string_view EXTENSION_NAME = "duckdb_object_storage";
+constexpr std::string_view ATTACH_MAPPED_DATABASE = "duckdb_objfs_attach_mapped_database";
+
 string AttachMappedDatabase(ClientContext &context, const FunctionParameters &parameters) {
 	auto &database_manager = DatabaseManager::Get(context);
-	auto &default_database_name = DatabaseManager::GetDefaultDatabase(context);
+	auto default_database_name = DatabaseManager::GetDefaultDatabase(context);
 	auto default_database = database_manager.GetDatabase(context, default_database_name);
 	if (!default_database) {
 		throw InternalException("Cannot resolve the current database for SlateDB path mapping");
@@ -36,10 +42,9 @@ string AttachMappedDatabase(ClientContext &context, const FunctionParameters &pa
 	MD5Context md5;
 	md5.Add(source_path);
 	auto mapped_path = StringUtil::Format("duckdb_objfs://mapped_%s.db", md5.FinishHex());
-	auto catalog_name = parameters.values[0].GetValue<string>();
+	auto catalog_name = Identifier(parameters.values[0].GetValue<string>());
 
-	return StringUtil::Format("ATTACH IF NOT EXISTS %s AS %s%s", KeywordHelper::WriteQuoted(mapped_path, '\''),
-	                          KeywordHelper::WriteOptionallyQuoted(catalog_name),
+	return StringUtil::Format("ATTACH IF NOT EXISTS %s AS %s%s", SQLString(mapped_path), SQLIdentifier(catalog_name),
 	                          default_database->IsReadOnly() ? " (READ_ONLY)" : "");
 }
 
@@ -51,7 +56,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Storage backend configuration.
 	config.AddExtensionOption("duckdb_objfs_backend", "Storage backend: s3, local, or memory", LogicalType::VARCHAR,
-	                          Value("local"), SLATEDB_FREEZE_GUARD("duckdb_objfs_backend"));
+	                          Value(SlateDBBackend::LOCAL), SLATEDB_FREEZE_GUARD("duckdb_objfs_backend"));
 	config.AddExtensionOption("duckdb_objfs_bucket", "S3 bucket used by the DuckDB object filesystem",
 	                          LogicalType::VARCHAR, Value(), SLATEDB_FREEZE_GUARD("duckdb_objfs_bucket"));
 	config.AddExtensionOption("duckdb_objfs_root", "Local directory or S3 object prefix used by the filesystem",
@@ -85,8 +90,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto file_system = make_uniq<SlateDBFileSystem>();
 	loader.RegisterFunction(GetSlateDBCacheStatsFunction(*file_system));
 	loader.RegisterFunction(GetSlateDBIoStatsFunction(*file_system));
-	loader.RegisterFunction(PragmaFunction::PragmaCall("duckdb_objfs_attach_mapped_database", AttachMappedDatabase,
-	                                                   {LogicalType::VARCHAR}));
+	loader.RegisterFunction(
+	    PragmaFunction::PragmaCall(Identifier(ATTACH_MAPPED_DATABASE), AttachMappedDatabase, {LogicalType::VARCHAR}));
 	instance.GetFileSystem().RegisterSubSystem(std::move(file_system));
 }
 
@@ -95,7 +100,7 @@ void DuckdbObjectStorageExtension::Load(ExtensionLoader &loader) {
 }
 
 std::string DuckdbObjectStorageExtension::Name() {
-	return "duckdb_object_storage";
+	return string(EXTENSION_NAME);
 }
 
 std::string DuckdbObjectStorageExtension::Version() const {

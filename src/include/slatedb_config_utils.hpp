@@ -1,10 +1,20 @@
 #pragma once
 
-#include "duckdb/common/case_insensitive_map.hpp"
+#include "duckdb/common/identifier.hpp"
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
+#include <string_view>
+
 namespace duckdb {
+
+namespace SlateDBBackend {
+inline constexpr std::string_view MEMORY = "memory";
+inline constexpr std::string_view LOCAL = "local";
+inline constexpr std::string_view S3 = "s3";
+inline constexpr std::string_view DEFAULT_LOCAL_ROOT = ".duckdb_objfs";
+inline constexpr std::string_view DEFAULT_S3_ROOT = "duckdb_objfs";
+} // namespace SlateDBBackend
 
 // Forward declarations
 class ClientContext;
@@ -61,13 +71,13 @@ struct RuntimeInitializationConfig {
 // from the snapshot. Values are stored in their normalized Value::ToString() form so the set callback can compare
 // with a single map lookup.
 struct FrozenSlateDBSettings : public ObjectCacheEntry {
-	static constexpr const char *CACHE_KEY = "duckdb_objfs_frozen_settings";
+	static constexpr std::string_view CACHE_KEY = "duckdb_objfs_frozen_settings";
 
 	//! Normalized effective value per initialization setting name.
-	case_insensitive_map_t<string> values;
+	identifier_map_t<string> values;
 
 	static string ObjectType() {
-		return CACHE_KEY;
+		return string(CACHE_KEY);
 	}
 	string GetObjectType() override {
 		return ObjectType();
@@ -78,14 +88,14 @@ struct FrozenSlateDBSettings : public ObjectCacheEntry {
 	}
 };
 
-string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name);
-string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name);
+string GetRequiredSetting(optional_ptr<FileOpener> opener, const Identifier &name);
+string GetOptionalSetting(optional_ptr<FileOpener> opener, const Identifier &name);
 S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opener);
 CacheInitializationConfig ReadCacheInitializationConfig(optional_ptr<FileOpener> opener);
 RuntimeInitializationConfig ReadRuntimeInitializationConfig(optional_ptr<FileOpener> opener);
 
 //! Throws if the SlateDB filesystem is already initialized and `new_value` differs from the value the filesystem was
 //! initialized with.
-void CheckFrozenSlateDBSetting(ClientContext &context, const string &name, const Value &new_value);
+void CheckFrozenSlateDBSetting(ClientContext &context, const Identifier &name, const Value &new_value);
 
 } // namespace duckdb

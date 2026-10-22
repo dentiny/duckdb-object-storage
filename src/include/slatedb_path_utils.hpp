@@ -2,7 +2,11 @@
 
 #include "duckdb/common/common.hpp"
 
+#include <string_view>
+
 namespace duckdb {
+
+inline constexpr std::string_view SLATEDB_URI_PREFIX = "duckdb_objfs:";
 
 //! Extracts the backend-independent logical file name from a duckdb_objfs URI.
 //!

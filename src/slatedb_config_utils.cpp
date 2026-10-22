@@ -8,7 +8,7 @@
 
 namespace duckdb {
 
-string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name) {
+string GetRequiredSetting(optional_ptr<FileOpener> opener, const Identifier &name) {
 	Value value;
 	if (!FileOpener::TryGetCurrentSetting(opener, name, value) || value.IsNull()) {
 		throw InvalidConfigurationException("Required setting '%s' is not configured", name);
@@ -20,7 +20,7 @@ string GetRequiredSetting(optional_ptr<FileOpener> opener, const string &name) {
 	return result;
 }
 
-string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name) {
+string GetOptionalSetting(optional_ptr<FileOpener> opener, const Identifier &name) {
 	Value value;
 	if (!FileOpener::TryGetCurrentSetting(opener, name, value) || value.IsNull()) {
 		return "";
@@ -29,7 +29,7 @@ string GetOptionalSetting(optional_ptr<FileOpener> opener, const string &name) {
 }
 
 template <class T>
-T GetSettingOrDefault(optional_ptr<FileOpener> opener, const string &name, T default_value) {
+T GetSettingOrDefault(optional_ptr<FileOpener> opener, const Identifier &name, T default_value) {
 	Value value;
 	if (!FileOpener::TryGetCurrentSetting(opener, name, value) || value.IsNull()) {
 		return default_value;
@@ -46,7 +46,7 @@ S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opene
 	result.bucket = GetRequiredSetting(opener, "duckdb_objfs_bucket");
 	result.root = GetOptionalSetting(opener, "duckdb_objfs_root");
 	if (result.root.empty()) {
-		result.root = "duckdb_objfs";
+		result.root = SlateDBBackend::DEFAULT_S3_ROOT;
 	}
 
 	auto secret_path = StringUtil::Format("s3://%s", result.bucket);
@@ -58,7 +58,7 @@ S3InitializationConfig ReadS3InitializationConfig(optional_ptr<FileOpener> opene
 		secret_path = StringUtil::Format("%s/%s", secret_path, scope_root);
 	}
 	FileOpenerInfo info {secret_path};
-	KeyValueSecretReader secret_reader(*opener, &info, "s3");
+	KeyValueSecretReader secret_reader(*opener, &info, SlateDBBackend::S3.data());
 	secret_reader.TryGetSecretKey("key_id", result.key_id);
 	secret_reader.TryGetSecretKey("secret", result.secret);
 	secret_reader.TryGetSecretKey("session_token", result.session_token);
@@ -100,15 +100,15 @@ RuntimeInitializationConfig ReadRuntimeInitializationConfig(optional_ptr<FileOpe
 	if (!database) {
 		return result;
 	}
-	auto threads = DBConfig::GetConfig(*database).options.maximum_threads;
-	// DuckDB v1.5 has no async thread setting, so async tasks also use its thread count.
-	result.async_threads = threads;
-	result.blocking_threads = threads;
+	// The filesystem can initialize before DuckDB starts its scheduler.
+	auto &options = DBConfig::GetConfig(*database).options;
+	result.async_threads = options.async_threads;
+	result.blocking_threads = options.maximum_threads;
 	return result;
 }
 
-void CheckFrozenSlateDBSetting(ClientContext &context, const string &name, const Value &new_value) {
-	auto frozen = context.db->GetObjectCache().Get<FrozenSlateDBSettings>(FrozenSlateDBSettings::CACHE_KEY);
+void CheckFrozenSlateDBSetting(ClientContext &context, const Identifier &name, const Value &new_value) {
+	auto frozen = context.db->GetObjectCache().Get<FrozenSlateDBSettings>(string(FrozenSlateDBSettings::CACHE_KEY));
 	if (!frozen) {
 		// The filesystem has not been initialized yet; the setting still takes effect.
 		return;
@@ -124,13 +124,14 @@ void CheckFrozenSlateDBSetting(ClientContext &context, const string &name, const
 	if (name == "duckdb_objfs_backend") {
 		effective = StringUtil::Lower(raw_string);
 		if (effective.empty()) {
-			effective = "local";
+			effective = SlateDBBackend::LOCAL;
 		}
 	} else if (name == "duckdb_objfs_root") {
 		effective = raw_string;
 		auto &backend = frozen->values.at("duckdb_objfs_backend");
-		if (backend != "memory" && effective.empty()) {
-			effective = backend == "s3" ? "duckdb_objfs" : ".duckdb_objfs";
+		if (backend != SlateDBBackend::MEMORY && effective.empty()) {
+			effective =
+			    backend == SlateDBBackend::S3 ? SlateDBBackend::DEFAULT_S3_ROOT : SlateDBBackend::DEFAULT_LOCAL_ROOT;
 		}
 	} else {
 		effective = new_value.IsNull() ? "" : new_value.ToString();
