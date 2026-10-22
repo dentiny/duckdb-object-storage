@@ -1,5 +1,9 @@
 # 0.2.0
 
+## Fixed
+
+- Include the attached-database definition when resolving mapped database paths in DuckDB v2 builds.
+
 ## Changed
 
 - Upgrade DuckDB to `v2.0.0` and extension-ci-tools to the latest commit.
