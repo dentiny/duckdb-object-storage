@@ -16,6 +16,11 @@ format-all: format
 test-s3:
 	bash test/s3/run_e2e.sh
 
+clean: clean-rust
+
+clean-rust:
+	rm -rf rust/target
+
 # Allow a DuckDB test filter as a positional make argument, for example:
 # make test_reldebug_duckdb "[wal]" "[disk]"
 #
@@ -89,4 +94,4 @@ $(foreach build,$(DUCKDB_BUILD_TYPES),test_$(build)_duckdb_survey):
 lint_duckdb_skip_lists:
 	$(DUCKDB_TEST_SKIPS) lint $(if $(wildcard ./build/release/test/unittest),--unittest ./build/release/test/unittest)
 
-.PHONY: format-all test-s3 lint_duckdb_skip_lists $(DUCKDB_TEST_TARGETS)
+.PHONY: format-all test-s3 clean-rust lint_duckdb_skip_lists $(DUCKDB_TEST_TARGETS)
