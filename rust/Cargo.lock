@@ -3289,9 +3289,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slatedb"
-version = "0.18.0"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4c3416299ebf61cbaa9b2fb2fc574a08ead53c9abf0eeaa1f84b23d6c530d2c"
+checksum = "371b0832486277108a130202eb2ce404e5ac426edd1490b5b973ca2d561b6055"
 dependencies = [
  "async-channel",
  "async-trait",
