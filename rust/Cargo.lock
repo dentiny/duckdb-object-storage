@@ -424,7 +424,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -743,7 +743,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1864,7 +1864,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2517,7 +2517,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2594,15 +2594,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core 0.10.1",
-]
-
-[[package]]
-name = "rand_xoshiro"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
-dependencies = [
- "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -2824,7 +2815,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2881,7 +2872,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3318,7 +3309,7 @@ dependencies = [
  "serde",
  "serde_json",
  "siphasher",
- "slatedb-common 0.18.1",
+ "slatedb-common",
  "slatedb-mirror",
  "slatedb-txn-obj",
  "smallvec",
@@ -3335,21 +3326,6 @@ dependencies = [
 
 [[package]]
 name = "slatedb-common"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5cb9fe0fa807c333fbb5880b222f5e72889fa22e40b2f13f479490d8b22f192"
-dependencies = [
- "chrono",
- "log",
- "object_store",
- "rand 0.9.5",
- "rand_xoshiro 0.7.0",
- "thread_local",
- "tokio",
-]
-
-[[package]]
-name = "slatedb-common"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4c6758f235603647a9a689d827852222d475e2011b1ea32d62d87d0808881f63"
@@ -3362,7 +3338,7 @@ dependencies = [
  "object_store",
  "parking_lot",
  "rand 0.10.3",
- "rand_xoshiro 0.8.1",
+ "rand_xoshiro",
  "serde",
  "thread_local",
  "tokio",
@@ -3385,7 +3361,7 @@ dependencies = [
  "s3s",
  "s3s-fs",
  "slatedb",
- "slatedb-common 0.17.0",
+ "slatedb-common",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -3409,7 +3385,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
- "slatedb-common 0.18.1",
+ "slatedb-common",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -3428,7 +3404,7 @@ dependencies = [
  "log",
  "object_store",
  "parking_lot",
- "slatedb-common 0.18.1",
+ "slatedb-common",
  "thiserror 1.0.69",
 ]
 
@@ -3560,7 +3536,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4167,7 +4143,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
