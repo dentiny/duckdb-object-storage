@@ -4,7 +4,7 @@
 # Extension from this repo
 duckdb_extension_load(
   duckdb_object_storage SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR} EXTENSION_VERSION
-  0.2.0 LOAD_TESTS)
+  0.2.1 LOAD_TESTS)
 duckdb_extension_statically_link(duckdb_object_storage)
 
 # Any extra extensions that should be built e.g.: duckdb_extension_load(json)
