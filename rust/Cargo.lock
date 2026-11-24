@@ -3318,7 +3318,7 @@ dependencies = [
  "serde",
  "serde_json",
  "siphasher",
- "slatedb-common 0.18.1",
+ "slatedb-common",
  "slatedb-mirror",
  "slatedb-txn-obj",
  "smallvec",
@@ -3331,21 +3331,6 @@ dependencies = [
  "url",
  "uuid",
  "walkdir",
-]
-
-[[package]]
-name = "slatedb-common"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5cb9fe0fa807c333fbb5880b222f5e72889fa22e40b2f13f479490d8b22f192"
-dependencies = [
- "chrono",
- "log",
- "object_store",
- "rand 0.9.5",
- "rand_xoshiro 0.7.0",
- "thread_local",
- "tokio",
 ]
 
 [[package]]
@@ -3385,7 +3370,7 @@ dependencies = [
  "s3s",
  "s3s-fs",
  "slatedb",
- "slatedb-common 0.17.0",
+ "slatedb-common",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -3409,7 +3394,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
- "slatedb-common 0.18.1",
+ "slatedb-common",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -3428,7 +3413,7 @@ dependencies = [
  "log",
  "object_store",
  "parking_lot",
- "slatedb-common 0.18.1",
+ "slatedb-common",
  "thiserror 1.0.69",
 ]
 

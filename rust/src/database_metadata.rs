@@ -46,10 +46,7 @@ impl DatabaseMetadata<Db> {
         validate_path(path)?;
 
         let path_key = path_key(path);
-        let transaction = self
-            .client
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await?;
+        let transaction = self.client.begin(IsolationLevel::SerializableSnapshot)?;
         let file_id = transaction
             .get(&path_key)
             .await?
@@ -79,10 +76,7 @@ impl DatabaseMetadata<Db> {
 
         let source_key = path_key(source);
         let target_key = path_key(target);
-        let transaction = self
-            .client
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await?;
+        let transaction = self.client.begin(IsolationLevel::SerializableSnapshot)?;
 
         let source_file_id = transaction
             .get(&source_key)
@@ -121,10 +115,7 @@ impl DatabaseMetadata<Db> {
         validate_path(path)?;
 
         let path_key = path_key(path);
-        let transaction = self
-            .client
-            .begin(IsolationLevel::SerializableSnapshot)
-            .await?;
+        let transaction = self.client.begin(IsolationLevel::SerializableSnapshot)?;
 
         if let Some((file_id, metadata)) = find_file(&transaction, path).await? {
             if truncate_existing {
