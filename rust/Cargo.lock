@@ -2598,15 +2598,6 @@ dependencies = [
 
 [[package]]
 name = "rand_xoshiro"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f703f4665700daf5512dcca5f43afa6af89f09db47fb56be587f80636bda2d41"
-dependencies = [
- "rand_core 0.9.5",
-]
-
-[[package]]
-name = "rand_xoshiro"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "662effc7698e08ea324d3acccf8d9d7f7bf79b9785e270a174ea36e56900c91d"
@@ -3289,9 +3280,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "slatedb"
-version = "0.18.0"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4c3416299ebf61cbaa9b2fb2fc574a08ead53c9abf0eeaa1f84b23d6c530d2c"
+checksum = "371b0832486277108a130202eb2ce404e5ac426edd1490b5b973ca2d561b6055"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -3347,7 +3338,7 @@ dependencies = [
  "object_store",
  "parking_lot",
  "rand 0.10.3",
- "rand_xoshiro 0.8.1",
+ "rand_xoshiro",
  "serde",
  "thread_local",
  "tokio",
